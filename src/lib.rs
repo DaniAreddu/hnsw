@@ -1,3 +1,5 @@
+use std::task::Wake;
+
 use crate::kmeans::KMeans;
 
 mod kmeans;
@@ -82,6 +84,19 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         }
         table
     }
+
+    pub fn sdc_table(&self) -> Vec<Vec<Vec<f32>>> {
+        let mut adc_table = vec![vec![vec![0_f32; self.k]; self.k]; M];
+        for m in 0..M {
+            for i in 0..self.k {
+                for j in 0..self.k {
+                    let dist = l2_squared(&self.codebooks[m][i], &self.codebooks[m][j]);
+                    adc_table[m][i][j] = dist;
+                }
+            }
+        }
+        adc_table
+    }
 }
 
 pub fn adc_distance<const M: usize>(table: &[Vec<f32>], q_code: &[usize; M]) -> f32 {
@@ -89,6 +104,19 @@ pub fn adc_distance<const M: usize>(table: &[Vec<f32>], q_code: &[usize; M]) -> 
     let mut dist = 0.0;
     for m in 0..M {
         dist += table[m][q_code[m]];
+    }
+    dist
+}
+
+pub fn sdc_distance<const M: usize>(
+    table: &[Vec<Vec<f32>>],
+    a: &[usize; M],
+    b: &[usize; M],
+) -> f32 {
+    assert_eq!(table.len(), M, "sdc table has wrong number of quantizers");
+    let mut dist = 0.0;
+    for m in 0..M {
+        dist += table[m][a[m]][b[m]];
     }
     dist
 }
