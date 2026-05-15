@@ -67,6 +67,17 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         enc
     }
 
+    pub fn decode(&self, code: &[usize; M]) -> [f32; D] {
+        let mut dec = [0_f32; D];
+        for m in 0..M {
+            let centroid = &self.codebooks[m][code[m]];
+            let start = m * self.subdims;
+            let end = start + self.subdims;
+            dec[start..end].copy_from_slice(centroid);
+        }
+        dec
+    }
+
     pub fn adc_table(&self, query: &[f32; D]) -> Vec<Vec<f32>> {
         assert!(
             self.trained,
