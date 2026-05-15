@@ -11,6 +11,7 @@ struct ProductQuantizer<const M: usize, const D: usize> {
 
 impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
     pub fn new(k: usize) -> Self {
+        assert!(M > 0, "M must be greater than 0");
         assert!(
             D.is_multiple_of(M),
             "number of dimensions must be divisible by number of quantizers"
@@ -29,10 +30,10 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         assert!(data.len() >= self.k, "not enough vectors");
 
         let mut codebooks = Vec::with_capacity(M);
-        for i in 0..M {
+        for m in 0..M {
             let mut d: Vec<Vec<f32>> = Vec::with_capacity(data.len());
             for v in data.iter() {
-                let start = i * self.subdims;
+                let start = m * self.subdims;
                 let end = start + self.subdims;
                 d.push(v[start..end].to_vec());
             }
@@ -52,16 +53,44 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         );
 
         let mut enc = [0; M];
-        for (i, centroids) in self.codebooks.iter().enumerate() {
-            let start = i * self.subdims;
+        for m in 0..M {
+            let start = m * self.subdims;
             let end = start + self.subdims;
-            let (min, _) = closest_centroid(centroids, &query[start..end]);
-            enc[i] = min;
+            let (min, _) = closest_centroid(&self.codebooks[m], &query[start..end]);
+            enc[m] = min;
         }
 
         enc
     }
+
+    pub fn adc_table(&self, query: &[f32; D]) -> Vec<Vec<f32>> {
+        assert!(
+            self.trained,
+            "ProductQuantizer must be trained to build the adc_table"
+        );
+        let mut table = vec![vec![0_f32; self.k]; M];
+        for m in 0..M {
+            let start = m * self.subdims;
+            let end = start + self.subdims;
+            let q = &query[start..end];
+            for id in 0..self.k {
+                let dist = l2_squared(q, &self.codebooks[m][id]);
+                table[m][id] = dist;
+            }
+        }
+        table
+    }
 }
+
+pub fn adc_distance<const M: usize>(table: &[Vec<f32>], q_code: &[usize; M]) -> f32 {
+    assert_eq!(table.len(), M, "adc table has wrong number of quantizers");
+    let mut dist = 0.0;
+    for m in 0..M {
+        dist += table[m][q_code[m]];
+    }
+    dist
+}
+
 fn closest_centroid<'a>(centroids: &'a [Vec<f32>], q: &[f32]) -> (usize, &'a [f32]) {
     assert!(!centroids.is_empty(), "not enough centroids");
 

@@ -75,7 +75,7 @@ impl KMeans {
                 // keep old centroid
                 if counts[c] == 0 {
                     centroids[c] = self.centroids[c].clone();
-                    break;
+                    continue;
                 }
                 for scalar in centroids[c].iter_mut() {
                     // counts[c] can't be zero
@@ -103,7 +103,7 @@ impl KMeans {
 
     pub fn encode(&self, q: &[f32]) -> (usize, &[f32]) {
         assert!(q.len() == self.d, "mismatched dimensions");
-        assert!(!self.trained, "KMeans must be trained before encoding");
+        assert!(self.trained, "KMeans must be trained before encoding");
         closest_centroid(&self.centroids, q)
     }
 
