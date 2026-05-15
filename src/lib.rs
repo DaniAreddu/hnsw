@@ -1,8 +1,10 @@
 use crate::kmeans::KMeans;
 
 mod kmeans;
+#[cfg(test)]
+mod tests;
 
-struct ProductQuantizer<const M: usize, const D: usize> {
+pub struct ProductQuantizer<const M: usize, const D: usize> {
     codebooks: Vec<Vec<Vec<f32>>>,
     k: usize,
     subdims: usize,
