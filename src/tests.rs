@@ -3,7 +3,7 @@ use crate::{ProductQuantizer, adc_distance, kmeans::KMeans, l2_squared};
 #[test]
 fn product_quantizer_encodes_and_scores_with_single_centroid() {
     let mut pq = ProductQuantizer::<2, 4>::new(1);
-    pq.fit(vec![[1.0, 2.0, 10.0, 20.0], [3.0, 4.0, 30.0, 40.0]]);
+    pq.fit(&[[1.0, 2.0, 10.0, 20.0], [3.0, 4.0, 30.0, 40.0]]);
 
     let query = [2.0, 3.0, 20.0, 30.0];
     let code = pq.encode(&query);

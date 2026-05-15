@@ -1,5 +1,3 @@
-use std::task::Wake;
-
 use crate::kmeans::KMeans;
 
 mod kmeans;
@@ -15,6 +13,7 @@ pub struct ProductQuantizer<const M: usize, const D: usize> {
 
 impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
     pub fn new(k: usize) -> Self {
+        assert!(k <= 256, "k must fit in an u8");
         assert!(M > 0, "M must be greater than 0");
         assert!(
             D.is_multiple_of(M),
@@ -29,7 +28,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         }
     }
 
-    pub fn fit(&mut self, data: Vec<[f32; D]>) {
+    pub fn fit(&mut self, data: &[[f32; D]]) {
         assert!(!self.trained, "ProductQuantizer was already trained");
         assert!(data.len() >= self.k, "not enough vectors");
 
@@ -37,9 +36,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         for m in 0..M {
             let mut d: Vec<Vec<f32>> = Vec::with_capacity(data.len());
             for v in data.iter() {
-                let start = m * self.subdims;
-                let end = start + self.subdims;
-                d.push(v[start..end].to_vec());
+                d.push(v[self.subdim_range(m)].to_vec());
             }
             let mut quantizer = KMeans::new(d, self.k, self.subdims);
             quantizer.train();
@@ -50,7 +47,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         self.codebooks = codebooks;
     }
 
-    pub fn encode(&self, query: &[f32; D]) -> [usize; M] {
+    pub fn encode(&self, query: &[f32; D]) -> [u8; M] {
         assert!(
             self.trained,
             "ProductQuantizer must be trained to encode a query"
@@ -58,22 +55,18 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
 
         let mut enc = [0; M];
         for m in 0..M {
-            let start = m * self.subdims;
-            let end = start + self.subdims;
-            let (min, _) = closest_centroid(&self.codebooks[m], &query[start..end]);
+            let (min, _) = closest_centroid(&self.codebooks[m], &query[self.subdim_range(m)]);
             enc[m] = min;
         }
 
         enc
     }
 
-    pub fn decode(&self, code: &[usize; M]) -> [f32; D] {
+    pub fn decode(&self, code: &[u8; M]) -> [f32; D] {
         let mut dec = [0_f32; D];
         for m in 0..M {
-            let centroid = &self.codebooks[m][code[m]];
-            let start = m * self.subdims;
-            let end = start + self.subdims;
-            dec[start..end].copy_from_slice(centroid);
+            let centroid = &self.codebooks[m][code[m] as usize];
+            dec[self.subdim_range(m)].copy_from_slice(centroid);
         }
         dec
     }
@@ -85,9 +78,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         );
         let mut table = vec![vec![0_f32; self.k]; M];
         for m in 0..M {
-            let start = m * self.subdims;
-            let end = start + self.subdims;
-            let q = &query[start..end];
+            let q = &query[self.subdim_range(m)];
             for id in 0..self.k {
                 let dist = l2_squared(q, &self.codebooks[m][id]);
                 table[m][id] = dist;
@@ -108,31 +99,33 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         }
         adc_table
     }
+
+    fn subdim_range(&self, m: usize) -> std::ops::Range<usize> {
+        let start = m * self.subdims;
+        let end = start + self.subdims;
+        start..end
+    }
 }
 
-pub fn adc_distance<const M: usize>(table: &[Vec<f32>], q_code: &[usize; M]) -> f32 {
+pub fn adc_distance<const M: usize>(table: &[Vec<f32>], q_code: &[u8; M]) -> f32 {
     assert_eq!(table.len(), M, "adc table has wrong number of quantizers");
     let mut dist = 0.0;
     for m in 0..M {
-        dist += table[m][q_code[m]];
+        dist += table[m][q_code[m] as usize];
     }
     dist
 }
 
-pub fn sdc_distance<const M: usize>(
-    table: &[Vec<Vec<f32>>],
-    a: &[usize; M],
-    b: &[usize; M],
-) -> f32 {
+pub fn sdc_distance<const M: usize>(table: &[Vec<Vec<f32>>], a: &[u8; M], b: &[u8; M]) -> f32 {
     assert_eq!(table.len(), M, "sdc table has wrong number of quantizers");
     let mut dist = 0.0;
     for m in 0..M {
-        dist += table[m][a[m]][b[m]];
+        dist += table[m][a[m] as usize][b[m] as usize];
     }
     dist
 }
 
-fn closest_centroid<'a>(centroids: &'a [Vec<f32>], q: &[f32]) -> (usize, &'a [f32]) {
+fn closest_centroid<'a>(centroids: &'a [Vec<f32>], q: &[f32]) -> (u8, &'a [f32]) {
     assert!(!centroids.is_empty(), "not enough centroids");
 
     let mut min = 0;
@@ -145,7 +138,7 @@ fn closest_centroid<'a>(centroids: &'a [Vec<f32>], q: &[f32]) -> (usize, &'a [f3
         }
     }
 
-    (min, &centroids[min])
+    (min as u8, &centroids[min])
 }
 
 fn l2_squared(a: &[f32], b: &[f32]) -> f32 {

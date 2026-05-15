@@ -3,7 +3,7 @@ use crate::{closest_centroid, l2_squared};
 pub(crate) struct KMeans {
     pub(crate) centroids: Vec<Vec<f32>>,
     data: Vec<Vec<f32>>,
-    cluster_mappings: Vec<usize>,
+    cluster_mappings: Vec<u8>,
     k: usize,
     d: usize,
     trained: bool,
@@ -14,6 +14,7 @@ impl KMeans {
     const MIN_MOVEMENT: f32 = 1e-5;
 
     pub fn empty(k: usize, d: usize) -> Self {
+        assert!(k <= 256, "k must fit in an u8");
         assert!(k > 0, "k must be greater than zero");
         Self {
             centroids: Vec::new(),
@@ -26,6 +27,7 @@ impl KMeans {
     }
 
     pub fn new(data: Vec<Vec<f32>>, k: usize, d: usize) -> Self {
+        assert!(k <= 256, "k must fit in an u8");
         assert!(data.len() >= k, "not enough vectors");
         assert!(data[0].len() == d, "mismatched dimensions");
 
@@ -66,12 +68,14 @@ impl KMeans {
             let mut counts = vec![0; self.k];
 
             for (vec_idx, centroid_idx) in self.cluster_mappings.iter().enumerate() {
-                for (dim_idx, scalar) in centroids[*centroid_idx].iter_mut().enumerate() {
+                let centroid_idx = *centroid_idx as usize;
+                for (dim_idx, scalar) in centroids[centroid_idx].iter_mut().enumerate() {
                     *scalar += self.data[vec_idx][dim_idx];
                 }
-                counts[*centroid_idx] += 1;
+                counts[centroid_idx] += 1;
             }
             for c in 0..self.k {
+                let c = c as usize;
                 // keep old centroid
                 if counts[c] == 0 {
                     centroids[c] = self.centroids[c].clone();
@@ -101,7 +105,7 @@ impl KMeans {
         std::mem::take(&mut self.data);
     }
 
-    pub fn encode(&self, q: &[f32]) -> (usize, &[f32]) {
+    pub fn encode(&self, q: &[f32]) -> (u8, &[f32]) {
         assert!(q.len() == self.d, "mismatched dimensions");
         assert!(self.trained, "KMeans must be trained before encoding");
         closest_centroid(&self.centroids, q)
