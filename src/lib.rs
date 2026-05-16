@@ -5,6 +5,7 @@ mod kmeans;
 #[cfg(test)]
 mod tests;
 
+#[derive(Clone)]
 pub struct ProductQuantizer<const M: usize, const D: usize> {
     // M of K of sudim f32s
     codebooks: Vec<f32>,
@@ -75,7 +76,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         );
         let mut dec = [0_f32; D];
         for m in 0..M {
-            assert!(code[m] < self.k as u8, "code index out of bounds");
+            assert!((code[m] as usize) < self.k, "code index out of bounds");
             let centroid = &self.codebooks[self.one_centroid_range(m, code[m] as usize)];
             dec[self.subdim_range(m)].copy_from_slice(centroid);
         }
@@ -103,7 +104,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         assert!(table.len() == self.k * M, "adc table has invalid shape");
         let mut dist = 0.0;
         for m in 0..M {
-            assert!(q_code[m] < self.k as u8, "code index out of bounds");
+            assert!((q_code[m] as usize) < self.k, "code index out of bounds");
             dist += table[(m * self.k) + q_code[m] as usize];
         }
         dist
