@@ -1,4 +1,4 @@
-use crate::{ProductQuantizer, adc_distance, kmeans::KMeans, l2_squared};
+use crate::{ProductQuantizer, kmeans::KMeans, l2_squared};
 
 #[test]
 fn product_quantizer_encodes_and_scores_with_single_centroid() {
@@ -11,16 +11,16 @@ fn product_quantizer_encodes_and_scores_with_single_centroid() {
 
     assert_eq!(code, [0, 0]);
     assert_eq!(table.len(), 2);
-    assert_eq!(table[0], vec![0.0]);
-    assert_eq!(table[1], vec![0.0]);
-    assert_eq!(adc_distance(&table, &code), 0.0);
+    assert_eq!(table, vec![0.0, 0.0]);
+    assert_eq!(pq.adc_distance(&table, &code), 0.0);
 }
 
 #[test]
 fn adc_distance_sums_selected_subquantizer_distances() {
-    let table = vec![vec![1.0, 2.0], vec![4.0, 8.0], vec![16.0, 32.0]];
+    let pq = ProductQuantizer::<3, 3>::new(2);
+    let table = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 
-    assert_eq!(adc_distance::<3>(&table, &[1, 0, 1]), 38.0);
+    assert_eq!(pq.adc_distance(&table, &[1, 0, 1]), 38.0);
 }
 
 #[test]
