@@ -116,8 +116,11 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
             "ProductQuantizer must be trained to build the sdc_table"
         );
         let mut adc_table = vec![vec![vec![0_f32; self.k]; self.k]; M];
+        #[allow(clippy::needless_range_loop)]
         for m in 0..M {
+            #[allow(clippy::needless_range_loop)]
             for i in 0..self.k {
+                #[allow(clippy::needless_range_loop)]
                 for j in 0..self.k {
                     let dist = l2_squared(
                         &self.codebooks[self.one_centroid_range(m, i)],

@@ -12,9 +12,10 @@ pub(crate) struct KMeans {
 }
 
 impl KMeans {
-    const MAX_ITERS: usize = 1e3 as usize;
+    const MAX_ITERS: usize = 50;
     const MIN_MOVEMENT: f32 = 1e-5;
 
+    #[allow(dead_code)]
     pub fn empty(k: usize, dims: usize) -> Self {
         assert!(k <= 256, "k must fit in an u8");
         assert!(k > 0, "k must be greater than zero");
@@ -43,6 +44,7 @@ impl KMeans {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add_batch(&mut self, data: Vec<Vec<f32>>) {
         assert!(data.len() >= self.k, "not enough vectors");
         assert!(data[0].len() == self.dims, "mismatched dimensions");
@@ -78,6 +80,7 @@ impl KMeans {
                 }
                 counts[centroid_idx] += 1;
             }
+            #[allow(clippy::needless_range_loop)]
             for c in 0..self.k {
                 let range = (c * self.dims)..(c * self.dims) + self.dims;
                 // keep old centroid
@@ -112,6 +115,7 @@ impl KMeans {
         std::mem::take(&mut self.data);
     }
 
+    #[allow(dead_code)]
     pub fn encode(&self, q: &[f32]) -> (u8, &[f32]) {
         assert!(q.len() == self.dims, "mismatched dimensions");
         assert!(self.trained, "KMeans must be trained before encoding");
@@ -165,45 +169,3 @@ fn sample_from_weights(data: &[Vec<f32>], weights: Vec<f32>) -> (usize, &[f32]) 
     let idx = dist.sample(&mut rng);
     (idx, &data[idx])
 }
-
-// this is just most distant point from centroids initialization, it suffers from outliers
-// fn random_centroids_from_data(data: &[Vec<f32>], k: usize, d: usize) -> Vec<f32> {
-//         assert!(data.len() >= k, "not enough vectors");
-//         let mut centroids = Vec::with_capacity(k * d);
-//
-//         if data.len() == k {
-//             let mut centroids = Vec::with_capacity(k * d);
-//             for vec in data {
-//                 centroids.extend_from_slice(vec);
-//             }
-//             return centroids;
-//         }
-//
-//         let mut used = std::collections::HashSet::new();
-//         let start = rand::random_range(0..data.len());
-//         centroids.extend_from_slice(&data[start]);
-//         used.insert(start);
-//
-//         for _ in 1..k {
-//             // find furthest point from current centroids
-//             let mut max_dist = 0f32;
-//             let mut max_dist_idx = 0;
-//             for (i, vec) in data.iter().enumerate() {
-//                 if used.contains(&i) {
-//                     continue;
-//                 }
-//                 let mut curr_dist = 0f32;
-//                 for centroid in centroids.chunks(d) {
-//                     curr_dist += l2_squared(centroid, vec.as_slice());
-//                 }
-//                 if curr_dist >= max_dist {
-//                     max_dist = curr_dist;
-//                     max_dist_idx = i;
-//                 }
-//             }
-//
-//             centroids.extend_from_slice(&data[max_dist_idx]);
-//             used.insert(max_dist_idx);
-//         }
-//         centroids
-//     }
