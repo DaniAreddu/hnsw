@@ -1,3 +1,5 @@
+use rand::distr::Distribution;
+
 use crate::{closest_centroid, l2_squared};
 
 pub(crate) struct KMeans {
@@ -32,7 +34,7 @@ impl KMeans {
         assert!(data[0].len() == dims, "mismatched dimensions");
 
         Self {
-            centroids: Self::random_centroids_from_data(&data, k, dims),
+            centroids: Self::init_centroids(&data, k, dims),
             cluster_mappings: vec![0; data.len()],
             data,
             k,
@@ -47,7 +49,7 @@ impl KMeans {
         assert!(!self.trained, "quantizer already trained");
 
         self.data.extend(data);
-        self.centroids = Self::random_centroids_from_data(&self.data, self.k, self.dims);
+        self.centroids = Self::init_centroids(&self.data, self.k, self.dims);
         self.cluster_mappings = vec![0; self.data.len()];
     }
 
@@ -116,13 +118,92 @@ impl KMeans {
         closest_centroid(&self.centroids, self.dims, q)
     }
 
-    fn random_centroids_from_data(data: &[Vec<f32>], k: usize, d: usize) -> Vec<f32> {
-        let mut rng = rand::rng();
-        let rnd_indicies = rand::seq::index::sample(&mut rng, data.len(), k);
+    fn init_centroids(data: &[Vec<f32>], k: usize, d: usize) -> Vec<f32> {
+        assert!(data.len() >= k, "not enough vectors");
         let mut centroids = Vec::with_capacity(k * d);
-        for i in rnd_indicies {
-            centroids.extend_from_slice(&data[i])
+
+        if data.len() == k {
+            let mut centroids = Vec::with_capacity(k * d);
+            for vec in data {
+                centroids.extend_from_slice(vec);
+            }
+            return centroids;
+        }
+
+        let mut used = std::collections::HashSet::new();
+        let start = rand::random_range(0..data.len());
+        centroids.extend_from_slice(&data[start]);
+        used.insert(start);
+
+        for _ in 1..k {
+            // for each vector that has not been used, the distance from it's closest centroid
+            let weights: Vec<f32> = data
+                .iter()
+                .enumerate()
+                .map(|(i, vec)| {
+                    if used.contains(&i) {
+                        return 0f32;
+                    }
+                    centroids
+                        .chunks(d)
+                        .map(|c| l2_squared(vec.as_slice(), c))
+                        .min_by(|a, b| a.total_cmp(b))
+                        .unwrap_or(0f32)
+                })
+                .collect();
+            let (idx, new_centroid) = sample_from_weights(data, weights);
+            centroids.extend_from_slice(new_centroid);
+            used.insert(idx);
         }
         centroids
     }
 }
+
+fn sample_from_weights(data: &[Vec<f32>], weights: Vec<f32>) -> (usize, &[f32]) {
+    let mut rng = rand::rng();
+    let dist = rand::distr::weighted::WeightedIndex::new(weights).unwrap();
+    let idx = dist.sample(&mut rng);
+    (idx, &data[idx])
+}
+
+// this is just most distant point from centroids initialization, it suffers from outliers
+// fn random_centroids_from_data(data: &[Vec<f32>], k: usize, d: usize) -> Vec<f32> {
+//         assert!(data.len() >= k, "not enough vectors");
+//         let mut centroids = Vec::with_capacity(k * d);
+//
+//         if data.len() == k {
+//             let mut centroids = Vec::with_capacity(k * d);
+//             for vec in data {
+//                 centroids.extend_from_slice(vec);
+//             }
+//             return centroids;
+//         }
+//
+//         let mut used = std::collections::HashSet::new();
+//         let start = rand::random_range(0..data.len());
+//         centroids.extend_from_slice(&data[start]);
+//         used.insert(start);
+//
+//         for _ in 1..k {
+//             // find furthest point from current centroids
+//             let mut max_dist = 0f32;
+//             let mut max_dist_idx = 0;
+//             for (i, vec) in data.iter().enumerate() {
+//                 if used.contains(&i) {
+//                     continue;
+//                 }
+//                 let mut curr_dist = 0f32;
+//                 for centroid in centroids.chunks(d) {
+//                     curr_dist += l2_squared(centroid, vec.as_slice());
+//                 }
+//                 if curr_dist >= max_dist {
+//                     max_dist = curr_dist;
+//                     max_dist_idx = i;
+//                 }
+//             }
+//
+//             centroids.extend_from_slice(&data[max_dist_idx]);
+//             used.insert(max_dist_idx);
+//         }
+//         centroids
+//     }
