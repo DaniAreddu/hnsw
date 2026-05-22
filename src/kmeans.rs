@@ -4,10 +4,11 @@ use crate::{closest_centroid, l2_squared};
 
 pub(crate) struct KMeans {
     pub(crate) centroids: Vec<f32>,
-    data: Vec<Vec<f32>>,
+    data: Vec<f32>,
     cluster_mappings: Vec<u8>,
     k: usize,
     dims: usize,
+    n_vectors: usize,
     trained: bool,
 }
 
@@ -25,44 +26,61 @@ impl KMeans {
             cluster_mappings: Vec::new(),
             k,
             dims,
+            n_vectors: 0,
             trained: false,
         }
     }
 
-    pub fn new(data: Vec<Vec<f32>>, k: usize, dims: usize) -> Self {
+    pub fn new_flat(data: Vec<f32>, k: usize, dims: usize, n_vectors: usize) -> Self {
         assert!(k <= 256, "k must fit in an u8");
-        assert!(data.len() >= k, "not enough vectors");
-        assert!(data[0].len() == dims, "mismatched dimensions");
+        assert!(n_vectors >= k, "not enough vectors");
+        assert!(data.len() / n_vectors == dims, "mismatched dimensions");
 
         Self {
-            centroids: Self::init_centroids(&data, k, dims),
-            cluster_mappings: vec![0; data.len()],
+            centroids: Self::init_centroids(&data, k, dims, n_vectors),
+            cluster_mappings: vec![0; n_vectors],
             data,
             k,
             dims,
+            n_vectors,
             trained: false,
         }
     }
 
     #[allow(dead_code)]
+    pub fn new(data: Vec<Vec<f32>>, k: usize, dims: usize) -> Self {
+        assert!(k <= 256, "k must fit in an u8");
+        assert!(data.len() >= k, "not enough vectors");
+        assert!(data[0].len() == dims, "mismatched dimensions");
+
+        let n_vectors = data.len();
+        let data: Vec<f32> = data.into_iter().flatten().collect();
+        Self::new_flat(data, k, dims, n_vectors)
+    }
+
+    #[allow(dead_code)]
     pub fn add_batch(&mut self, data: Vec<Vec<f32>>) {
-        assert!(data.len() >= self.k, "not enough vectors");
+        assert!(self.n_vectors + data.len() >= self.k, "not enough vectors");
         assert!(data[0].len() == self.dims, "mismatched dimensions");
         assert!(!self.trained, "quantizer already trained");
 
-        self.data.extend(data);
-        self.centroids = Self::init_centroids(&self.data, self.k, self.dims);
+        self.n_vectors += data.len();
+        self.data.extend(data.into_iter().flatten());
+        self.centroids = Self::init_centroids(&self.data, self.k, self.dims, self.n_vectors);
         self.cluster_mappings = vec![0; self.data.len()];
     }
 
     pub fn train(&mut self) {
         assert!(self.data.len() >= self.k, "not enough vectors");
-        assert!(self.data[0].len() == self.dims, "mismatched dimensions");
+        assert!(
+            self.data.len() / self.n_vectors == self.dims,
+            "mismatched dimensions"
+        );
         assert!(!self.trained, "already trained");
 
         for _ in 0..Self::MAX_ITERS {
             // find closest centroid for each vector
-            for (i, v) in self.data.iter().enumerate() {
+            for (i, v) in self.data.chunks(self.dims).enumerate() {
                 let (closest, _) = closest_centroid(&self.centroids, self.dims, v);
                 self.cluster_mappings[i] = closest;
             }
@@ -73,10 +91,9 @@ impl KMeans {
 
             for (vec_idx, centroid_idx) in self.cluster_mappings.iter().enumerate() {
                 let centroid_idx = *centroid_idx as usize;
-                // for (dim_idx, scalar) in centroids[centroid_idx].iter_mut().enumerate() {
                 for d in 0..self.dims {
                     let idx = (centroid_idx * self.dims) + d;
-                    centroids[idx] += self.data[vec_idx][d];
+                    centroids[idx] += self.data[vec_idx * self.dims + d];
                 }
                 counts[centroid_idx] += 1;
             }
@@ -122,27 +139,27 @@ impl KMeans {
         closest_centroid(&self.centroids, self.dims, q)
     }
 
-    fn init_centroids(data: &[Vec<f32>], k: usize, d: usize) -> Vec<f32> {
-        assert!(data.len() >= k, "not enough vectors");
+    fn init_centroids(data: &[f32], k: usize, d: usize, n_vectors: usize) -> Vec<f32> {
+        assert!(n_vectors >= k, "not enough vectors");
         let mut centroids = Vec::with_capacity(k * d);
 
-        if data.len() == k {
+        if n_vectors == k {
             let mut centroids = Vec::with_capacity(k * d);
-            for vec in data {
+            for vec in data.chunks(d) {
                 centroids.extend_from_slice(vec);
             }
             return centroids;
         }
 
         let mut used = std::collections::HashSet::new();
-        let start = rand::random_range(0..data.len());
-        centroids.extend_from_slice(&data[start]);
+        let start = rand::random_range(0..n_vectors) * d;
+        centroids.extend_from_slice(&data[start..start + d]);
         used.insert(start);
 
         for _ in 1..k {
             // for each vector that has not been used, the distance from it's closest centroid
             let weights: Vec<f32> = data
-                .iter()
+                .chunks(d)
                 .enumerate()
                 .map(|(i, vec)| {
                     if used.contains(&i) {
@@ -150,18 +167,18 @@ impl KMeans {
                     }
                     centroids
                         .chunks(d)
-                        .map(|c| l2_squared(vec.as_slice(), c))
+                        .map(|c| l2_squared(vec, c))
                         .min_by(|a, b| a.total_cmp(b))
                         .unwrap_or(0f32)
                 })
                 .collect();
             let idx = sample_from_weights(&weights).unwrap_or_else(|| {
-                data.iter()
+                data.chunks(d)
                     .enumerate()
                     .find_map(|(i, _)| (!used.contains(&i)).then_some(i))
                     .expect("there must be an unused centroid candidate")
-            });
-            centroids.extend_from_slice(&data[idx]);
+            }) * d;
+            centroids.extend_from_slice(&data[idx..idx + d]);
             used.insert(idx);
         }
         centroids

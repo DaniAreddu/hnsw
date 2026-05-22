@@ -39,11 +39,11 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         let codebooks = (0..M)
             .into_par_iter()
             .flat_map(|m| {
-                let mut d: Vec<Vec<f32>> = Vec::with_capacity(data.len());
+                let mut d: Vec<f32> = Vec::with_capacity(data.len() * self.subdims);
                 for v in data.iter() {
-                    d.push(v[self.subdim_range(m)].to_vec());
+                    d.extend_from_slice(&v[self.subdim_range(m)]);
                 }
-                let mut q = KMeans::new(d, self.k, self.subdims);
+                let mut q = KMeans::new_flat(d, self.k, self.subdims, data.len());
                 q.train();
                 q.centroids
             })
