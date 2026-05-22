@@ -155,17 +155,21 @@ impl KMeans {
                         .unwrap_or(0f32)
                 })
                 .collect();
-            let (idx, new_centroid) = sample_from_weights(data, weights);
-            centroids.extend_from_slice(new_centroid);
+            let idx = sample_from_weights(&weights).unwrap_or_else(|| {
+                data.iter()
+                    .enumerate()
+                    .find_map(|(i, _)| (!used.contains(&i)).then_some(i))
+                    .expect("there must be an unused centroid candidate")
+            });
+            centroids.extend_from_slice(&data[idx]);
             used.insert(idx);
         }
         centroids
     }
 }
 
-fn sample_from_weights(data: &[Vec<f32>], weights: Vec<f32>) -> (usize, &[f32]) {
+fn sample_from_weights(weights: &[f32]) -> Option<usize> {
     let mut rng = rand::rng();
-    let dist = rand::distr::weighted::WeightedIndex::new(weights).unwrap();
-    let idx = dist.sample(&mut rng);
-    (idx, &data[idx])
+    let dist = rand::distr::weighted::WeightedIndex::new(weights).ok()?;
+    Some(dist.sample(&mut rng))
 }
