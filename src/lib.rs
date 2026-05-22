@@ -1,4 +1,5 @@
 use crate::kmeans::KMeans;
+use rayon::prelude::*;
 use std::mem::size_of;
 
 mod kmeans;
@@ -35,16 +36,18 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         assert!(!self.trained, "ProductQuantizer was already trained");
         assert!(data.len() >= self.k, "not enough vectors");
 
-        let mut codebooks = Vec::with_capacity(M * self.k * self.subdims);
-        for m in 0..M {
-            let mut d: Vec<Vec<f32>> = Vec::with_capacity(data.len());
-            for v in data.iter() {
-                d.push(v[self.subdim_range(m)].to_vec());
-            }
-            let mut quantizer = KMeans::new(d, self.k, self.subdims);
-            quantizer.train();
-            codebooks.extend(quantizer.centroids);
-        }
+        let codebooks = (0..M)
+            .into_par_iter()
+            .flat_map(|m| {
+                let mut d: Vec<Vec<f32>> = Vec::with_capacity(data.len());
+                for v in data.iter() {
+                    d.push(v[self.subdim_range(m)].to_vec());
+                }
+                let mut q = KMeans::new(d, self.k, self.subdims);
+                q.train();
+                q.centroids
+            })
+            .collect();
 
         self.trained = true;
         self.codebooks = codebooks;
