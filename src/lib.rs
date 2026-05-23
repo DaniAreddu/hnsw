@@ -36,6 +36,7 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         assert!(!self.trained, "ProductQuantizer was already trained");
         assert!(data.len() >= self.k, "not enough vectors");
 
+        let data = self.sample_data(data);
         let codebooks = (0..M)
             .into_par_iter()
             .flat_map(|m| {
@@ -134,6 +135,12 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
             }
         }
         adc_table
+    }
+
+    fn sample_data(&mut self, data: &[[f32; D]]) -> Vec<[f32; D]> {
+        let sample_size = data.len().min((256 * self.k).max(10_000));
+        let sampled = rand::seq::index::sample(&mut rand::rng(), data.len(), sample_size);
+        sampled.into_iter().map(|i| data[i]).collect()
     }
 
     pub fn heap_usage_bytes(&self) -> usize {
