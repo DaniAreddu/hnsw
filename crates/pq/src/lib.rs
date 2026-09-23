@@ -33,8 +33,33 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         }
     }
 
+    /// Trains the codebooks with a random seed; see [`ProductQuantizer::fit_seeded`].
     pub fn fit(&mut self, data: &[[f32; D]]) {
         self.fit_with_rng(data, &mut rand::rng());
+    }
+
+    /// Trains the codebooks deterministically: the same data, `k` and `seed` give
+    /// the same codebooks regardless of the number of rayon threads.
+    ///
+    /// # Panics
+    /// If the quantizer is already trained or `data` has fewer than `k` vectors.
+    pub fn fit_seeded(&mut self, data: &[[f32; D]], seed: u64) {
+        self.fit_with_rng(data, &mut StdRng::seed_from_u64(seed));
+    }
+
+    pub fn is_trained(&self) -> bool {
+        self.trained
+    }
+
+    /// Centroids per subquantizer.
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// `M * k` centroids of `D / M` floats each, subquantizer-major; empty until
+    /// trained.
+    pub fn codebooks(&self) -> &[f32] {
+        &self.codebooks
     }
 
     /// Samples the training set from `rng` and derives one independent seed per
