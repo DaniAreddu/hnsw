@@ -86,3 +86,42 @@ fn kmeans_init_can_pick_every_unused_vector() {
         );
     }
 }
+
+fn clustered(n: usize, seed: u64) -> Vec<[f32; 16]> {
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
+    let mut rng = StdRng::seed_from_u64(seed);
+    let centers: Vec<[f32; 16]> = (0..8)
+        .map(|_| std::array::from_fn(|_| rng.random_range(-10.0..10.0)))
+        .collect();
+    (0..n)
+        .map(|i| {
+            let c = centers[i % centers.len()];
+            std::array::from_fn(|d| c[d] + rng.random_range(-1.0..1.0))
+        })
+        .collect()
+}
+
+#[test]
+fn seeded_training_is_reproducible_across_thread_counts() {
+    let data = clustered(2_000, 1);
+    let train = |threads: usize, seed: u64| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let mut pq = ProductQuantizer::<4, 16>::new(16);
+            pq.fit_seeded(&data, seed);
+            pq.codebooks().to_vec()
+        })
+    };
+    let one = train(1, 7);
+    assert_eq!(one.len(), 4 * 16 * 4);
+    assert_eq!(one, train(4, 7));
+    assert_eq!(one, train(2, 7));
+    assert_ne!(
+        one,
+        train(4, 8),
+        "different seeds should give different codebooks"
+    );
+}
