@@ -122,6 +122,35 @@ jobs:
       - run: cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --version 0.13.2 --locked
       - run: cargo +"$FUZZ_TOOLCHAIN" fuzz run load_snapshot fuzz/corpus/load_snapshot -- -max_total_time=90 -rss_limit_mb=2048
 
+  package:
+    # cargo publish --dry-run for both crates, then a consumer built outside the
+    # repository against the extracted .crate archives.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo publish --dry-run -p hnsw-pq -p hnsw --locked
+      - run: bash scripts/verify-package.sh "$RUNNER_TEMP/package-consumer"
+
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo doc -p hnsw -p hnsw-pq --no-deps --all-features --locked
+
   msrv:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -148,7 +177,7 @@ jobs:
   # Single required status for branch rules; fails if any job above did not succeed.
   ci-ok:
     if: always()
-    needs: [fmt, clippy, test, bench-smoke, bench-hdf5, fuzz, msrv, deny]
+    needs: [fmt, clippy, test, bench-smoke, bench-hdf5, fuzz, package, docs, msrv, deny]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
