@@ -62,7 +62,13 @@ The benchmark binary reads a TOML config, builds or loads the requested indexes,
 
 ```sh
 RUSTFLAGS="-C target-cpu=native" \
-  cargo run --release -p hnsw-bench -- benchmarks/configs/path/to/config.toml
+  cargo run --release -p hnsw-bench --features hdf5 -- benchmarks/configs/path/to/config.toml
+```
+
+HDF5 input needs the `hdf5` feature, which builds HDF5 from source and requires CMake. Configs with a `[synthetic]` table (for example `configs/smoke/synthetic-16d.toml`, which CI runs) need neither:
+
+```sh
+cargo run --release -p hnsw-bench -- benchmarks/configs/smoke/synthetic-16d.toml
 ```
 
 Existing benchmark configs are organized under:
