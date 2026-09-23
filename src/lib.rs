@@ -489,16 +489,24 @@ where
         strict: bool,
     ) -> Result<usize, HnswError> {
         let _guard = self.update_lock.read().unwrap();
-        let (node, max_lyr) = self.new_node();
+        let (mut node, max_lyr) = self.new_node();
 
-        ctx.search_ctx.non_finite_distance = None;
-        self.prepare_node(vec, &node, max_lyr, ctx);
-        if let Some(distance) = ctx.search_ctx.non_finite_distance.take()
-            && strict
-        {
-            return Err(HnswError::NonFiniteDistance { distance });
-        }
-        let idx = self.commit(vec, node);
+        let idx = loop {
+            ctx.search_ctx.non_finite_distance = None;
+            let linked = self.prepare_node(vec, &node, max_lyr, ctx);
+            if let Some(distance) = ctx.search_ctx.non_finite_distance.take()
+                && strict
+            {
+                return Err(HnswError::NonFiniteDistance { distance });
+            }
+            // A node prepared against empty storage has no links and may only be
+            // committed as the very first node; if another insert won that race,
+            // search for neighbors again.
+            match self.commit(vec, node, !linked) {
+                Ok(idx) => break idx,
+                Err(unlinked) => node = unlinked,
+            }
+        };
         self.publish(idx, max_lyr, &mut ctx.select_ctx);
 
         Ok(idx)
@@ -531,12 +539,20 @@ where
         idx
     }
 
-    fn prepare_node(&self, vec: [f32; D], node: &Node, max_lyr: usize, ctx: &mut InsertContext) {
+    /// Links `node` into the current graph; returns `false` if storage was empty.
+    fn prepare_node(
+        &self,
+        vec: [f32; D],
+        node: &Node,
+        max_lyr: usize,
+        ctx: &mut InsertContext,
+    ) -> bool {
         let storage = self.storage.read().unwrap();
         if storage.data.is_empty() {
-            return;
+            return false;
         }
         self.prepare_node_with_storage(&storage, vec, node, max_lyr, ctx);
+        true
     }
     // assumes non empty storage
     fn prepare_node_with_storage(
@@ -588,17 +604,21 @@ where
         }
     }
 
-    fn commit(&self, vec: [f32; D], node: Node) -> usize {
-        assert!(
+    /// Appends the node; with `only_if_empty`, gives it back unless storage is empty.
+    fn commit(&self, vec: [f32; D], node: Node, only_if_empty: bool) -> Result<usize, Node> {
+        debug_assert!(
             !node.layers.is_empty(),
             "cannot commit a node with no layers"
         );
         let mut storage = self.storage.write().unwrap();
+        if only_if_empty && !storage.data.is_empty() {
+            return Err(node);
+        }
         let insert_idx = storage.data.len();
 
         storage.data.push(vec);
         storage.nodes.push(node);
-        insert_idx
+        Ok(insert_idx)
     }
 
     fn publish(&self, idx: usize, max_lyr: usize, select_ctx: &mut SelectContext) {
