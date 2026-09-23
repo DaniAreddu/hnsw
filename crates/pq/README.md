@@ -1,4 +1,6 @@
-# pq
+# hnsw-pq
+
+Vendored with `git subtree` from [leo0o7/product-quantization](https://github.com/leo0o7/product-quantization) at `902050a` (MIT, see `LICENSE`); used by the `experimental-pq` feature of the `hnsw` crate.
 
 > [!NOTE]
 > This is mostly a learning project. It implements the parts of product quantization needed by the parent HNSW project.
@@ -16,7 +18,7 @@ The resulting codes use one byte per subquantizer when `k <= 256`.
 - [x] symmetric distance computation (SDC)
 - [x] squared L2 distance
 
-The quantizer is trained once. It does not currently support save/load, incremental training, seeded randomness, or custom distance metrics.
+The quantizer is trained once, either from a random seed (`fit`) or reproducibly (`fit_seeded`, independent of the rayon thread count). It does not support save/load, incremental training, or custom distance metrics.
 
 ## Usage
 
