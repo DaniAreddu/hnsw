@@ -70,7 +70,12 @@ pub const DEFAULT_EF_SEARCH: usize = 32;
 /// An HNSW index over `[f32; D]` vectors with distance metric `DS`.
 ///
 /// # Ids
-/// Each inserted vector gets the next insertion position as its id (`0, 1, ...`).
+/// An index is *positional* or *explicit*, fixed by its first insert (see
+/// [`IdMode`]). Positional inserts (`insert`, `build_parallel`, ...) get the next
+/// insertion position as id. Explicit inserts (`insert_with_id`, ...) use the
+/// caller's `usize` id, which must be unique: a repeated id is rejected with
+/// [`HnswError::DuplicateId`], also when two threads race on it. Ids are saved
+/// with the index. There is no delete, update or upsert.
 ///
 /// # Concurrency
 /// Searches and inserts may run concurrently through `&Hnsw`. Once an insert call
