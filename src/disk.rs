@@ -34,6 +34,7 @@ struct SerializedHnsw<DS> {
     entry_point: usize,
     data: Vec<Vec<f32>>,
     nodes: Vec<Node>,
+    dup_next: Vec<u64>,
     max_layer: usize,
     ml: f64,
     seed: u64,
@@ -85,7 +86,7 @@ where
     {
         let _guard = self.update_lock.write().unwrap();
         let storage = self.storage.read().unwrap();
-        let mut state = serializer.serialize_struct("Hnsw", 9)?;
+        let mut state = serializer.serialize_struct("Hnsw", 11)?;
         let (ep, max_layer) = *self.entry.read().unwrap();
         state.serialize_field("M", &(self.M as u64))?;
         state.serialize_field("M0", &(self.M0 as u64))?;
@@ -93,6 +94,8 @@ where
         state.serialize_field("entry_point", &(ep as u64))?;
         state.serialize_field("data", &FlatF32::from(storage.data.as_slice()))?;
         state.serialize_field("nodes", &storage.nodes)?;
+        let dup_next: Vec<u64> = storage.dup_next.iter().map(|&next| next as u64).collect();
+        state.serialize_field("dup_next", &dup_next)?;
         state.serialize_field("max_layer", &(max_layer as u64))?;
         state.serialize_field("ml", &self.ml)?;
         state.serialize_field("seed", &self.seed)?;
@@ -122,6 +125,20 @@ where
             data.push(vec.try_into().expect("impossible"));
         }
 
+        if disk.dup_next.len() != data.len() || disk.nodes.len() != data.len() {
+            return Err(serde::de::Error::custom(
+                "node, duplicate-list and vector counts differ",
+            ));
+        }
+        let mut dup_next = Vec::with_capacity(disk.dup_next.len());
+        for next in disk.dup_next {
+            match usize::try_from(next) {
+                Ok(next) if next < data.len() => dup_next.push(next),
+                _ if next == u64::MAX => dup_next.push(crate::NO_DUP),
+                _ => return Err(serde::de::Error::custom("duplicate list out of bounds")),
+            }
+        }
+
         // advance rng
         let mut rng = StdRng::seed_from_u64(disk.seed);
         for _ in 0..data.len() {
@@ -137,6 +154,7 @@ where
             storage: RwLock::new(Storage {
                 data,
                 nodes: disk.nodes,
+                dup_next,
             }),
             ml: disk.ml,
             seed: disk.seed,

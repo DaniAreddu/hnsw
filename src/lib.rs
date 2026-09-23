@@ -37,6 +37,7 @@ use crate::{
 };
 use std::{
     cmp::Reverse,
+    collections::{HashMap, hash_map::Entry},
     mem::size_of,
     num::NonZeroUsize,
     sync::{Mutex, RwLock},
@@ -63,6 +64,28 @@ pub const MAX_EF_CONSTRUCTION: usize = 1 << 16;
 /// Search effort used by [`HnswSearcher::search`] and [`HnswSearcher::try_search`].
 pub const DEFAULT_EF_SEARCH: usize = 32;
 
+/// An HNSW index over `[f32; D]` vectors with distance metric `DS`.
+///
+/// # Ids
+/// Each inserted vector gets the next insertion position as its id (`0, 1, ...`).
+///
+/// # Concurrency
+/// Searches and inserts may run concurrently through `&Hnsw`. Once an insert call
+/// has returned, its vector is fully linked and later searches can find it
+/// (subject to the usual approximate recall); a search that overlaps an insert
+/// may or may not see it. `len()` counts vectors as soon
+/// as they are stored, which can be slightly before they are reachable.
+///
+/// # Determinism
+/// With a fixed seed, sequential inserts in a fixed order always build the same
+/// graph, also across save/load. `build_parallel` and `extend_parallel` depend
+/// on thread scheduling and are not reproducible.
+///
+/// # Duplicates
+/// A vector equal to an existing vector found by the insertion search is stored
+/// with its own id but shares that vector's graph node, so every copy is
+/// returned together. Copies inserted concurrently may instead become separate
+/// graph nodes.
 #[allow(non_snake_case)]
 pub struct Hnsw<const D: usize, DS = L2Squared> {
     M: usize,
@@ -77,10 +100,30 @@ pub struct Hnsw<const D: usize, DS = L2Squared> {
     dist: DS,
 }
 
+/// Exact duplicates of a graph node are stored as *members* of that node's group:
+/// they keep their own position (and id) but have no layers and are never linked.
+/// `dup_next` threads each group into a list starting at its graph node, and
+/// searches expand every group they reach. Without this, the diversity heuristic
+/// keeps at most one link into a set of identical vectors and most copies become
+/// unreachable.
 #[derive(Debug)]
 struct Storage<const D: usize> {
     pub(crate) data: Vec<[f32; D]>,
     pub(crate) nodes: Vec<Node>,
+    pub(crate) dup_next: Vec<usize>,
+}
+
+/// `dup_next` value for the end of a duplicate list.
+pub(crate) const NO_DUP: usize = usize::MAX;
+
+/// Where a prepared vector goes in the graph.
+enum Placement {
+    /// Storage was empty: may only be committed as the very first node.
+    First,
+    /// Linked to neighbors found by the insertion search.
+    Linked,
+    /// Exact duplicate of this graph node: joins its group.
+    DuplicateOf(usize),
 }
 
 /// k-nearest-neighbor search over an index.
@@ -229,6 +272,7 @@ where
             storage: RwLock::new(Storage {
                 data: Vec::new(),
                 nodes: Vec::new(),
+                dup_next: Vec::new(),
             }),
             ml,
             seed,
@@ -284,6 +328,46 @@ pub(crate) fn check_ef_search(ef_search: usize) -> Result<(), HnswError> {
         });
     }
     Ok(())
+}
+
+/// The `k` best of a final layer search as `(id, distance)`, ordered by distance
+/// and then ascending id. Each graph node is expanded into its duplicate group
+/// (at most `k` entries per group, all at the node's distance).
+pub(crate) fn top_k(candidates: &[Link], k: usize, dup_next: &[usize]) -> Vec<(usize, f32)> {
+    let mut hits: Vec<(usize, f32)> = Vec::with_capacity(candidates.len());
+    for link in candidates {
+        hits.push((link.node_index, link.distance));
+        let mut member = dup_next[link.node_index];
+        let mut taken = 1;
+        while member != NO_DUP && taken < k {
+            hits.push((member, link.distance));
+            member = dup_next[member];
+            taken += 1;
+        }
+    }
+    hits.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    hits.truncate(k);
+    hits
+}
+
+/// Hash key under which two vectors collide exactly when they compare equal
+/// (`-0.0` and `0.0` are normalized; NaN never reaches the index).
+fn exact_key<const D: usize>(v: &[f32; D]) -> [u32; D] {
+    v.map(|x| if x == 0.0 { 0 } else { x.to_bits() })
+}
+
+/// A graph node among the closest insertion-search candidates that equals `vec`.
+fn exact_duplicate<const D: usize>(
+    storage: &Storage<D>,
+    vec: &[f32; D],
+    candidates: &[Link],
+) -> Option<usize> {
+    let closest = candidates.first()?.distance;
+    candidates
+        .iter()
+        .take_while(|link| link.distance == closest)
+        .map(|link| link.node_index)
+        .find(|&idx| storage.data[idx] == *vec)
 }
 
 pub(crate) fn as_array<const D: usize>(v: &[f32]) -> Result<&[f32; D], HnswError> {
@@ -373,13 +457,7 @@ where
         // entry is already inserted
         {
             let entry = self.entry.read().unwrap();
-            assert!(
-                entry.0 < vecs.len(),
-                "entry point {} out of bounds for {} preallocated vectors",
-                entry.0,
-                vecs.len()
-            );
-            nodes.swap_remove(entry.0);
+            nodes.retain(|&(idx, _)| idx != entry.0);
         }
         if nodes.is_empty() {
             return;
@@ -489,17 +567,29 @@ where
         strict: bool,
     ) -> Result<usize, HnswError> {
         let _guard = self.update_lock.read().unwrap();
-        let (node, max_lyr) = self.new_node();
+        let (mut node, max_lyr) = self.new_node();
 
-        ctx.search_ctx.non_finite_distance = None;
-        self.prepare_node(vec, &node, max_lyr, ctx);
-        if let Some(distance) = ctx.search_ctx.non_finite_distance.take()
-            && strict
-        {
-            return Err(HnswError::NonFiniteDistance { distance });
+        let idx = loop {
+            ctx.search_ctx.non_finite_distance = None;
+            let placement = self.prepare_node(vec, &node, max_lyr, ctx);
+            if let Some(distance) = ctx.search_ctx.non_finite_distance.take()
+                && strict
+            {
+                return Err(HnswError::NonFiniteDistance { distance });
+            }
+            // A node prepared against empty storage has no links and may only be
+            // committed as the very first node; if another insert won that race,
+            // search for neighbors again.
+            let is_member = matches!(placement, Placement::DuplicateOf(_));
+            match self.commit(vec, node, placement) {
+                Ok(idx) => break (idx, is_member),
+                Err(unlinked) => node = unlinked,
+            }
+        };
+        let (idx, is_member) = idx;
+        if !is_member {
+            self.publish(idx, max_lyr, &mut ctx.select_ctx);
         }
-        let idx = self.commit(vec, node);
-        self.publish(idx, max_lyr, &mut ctx.select_ctx);
 
         Ok(idx)
     }
@@ -531,14 +621,24 @@ where
         idx
     }
 
-    fn prepare_node(&self, vec: [f32; D], node: &Node, max_lyr: usize, ctx: &mut InsertContext) {
+    /// Finds neighbors for `node` in the current graph.
+    fn prepare_node(
+        &self,
+        vec: [f32; D],
+        node: &Node,
+        max_lyr: usize,
+        ctx: &mut InsertContext,
+    ) -> Placement {
         let storage = self.storage.read().unwrap();
         if storage.data.is_empty() {
-            return;
+            return Placement::First;
         }
-        self.prepare_node_with_storage(&storage, vec, node, max_lyr, ctx);
+        match self.prepare_node_with_storage(&storage, vec, node, max_lyr, ctx) {
+            Some(rep) => Placement::DuplicateOf(rep),
+            None => Placement::Linked,
+        }
     }
-    // assumes non empty storage
+    // assumes non empty storage; returns the graph node `vec` duplicates, if found
     fn prepare_node_with_storage(
         &self,
         storage: &Storage<D>,
@@ -546,7 +646,7 @@ where
         node: &Node,
         max_lyr: usize,
         ctx: &mut InsertContext,
-    ) {
+    ) -> Option<usize> {
         assert!(
             max_lyr < node.layers.len(),
             "node has no layer {} (only {} layers)",
@@ -576,6 +676,11 @@ where
                 self.ef_construction,
                 search_ctx,
             );
+            if lyr == 0
+                && let Some(rep) = exact_duplicate(storage, &vec, candidates)
+            {
+                return Some(rep);
+            }
             let selected =
                 self.select_neighbors(storage, &vec, lyr, candidates, false, false, select_ctx);
 
@@ -586,19 +691,32 @@ where
             *node.layers[lyr].write().unwrap() = selected;
             ep = next_ep
         }
+        None
     }
 
-    fn commit(&self, vec: [f32; D], node: Node) -> usize {
-        assert!(
+    /// Appends the vector. A [`Placement::First`] node is given back unless storage
+    /// is still empty; a duplicate is stored as a layerless member of its group.
+    fn commit(&self, vec: [f32; D], node: Node, placement: Placement) -> Result<usize, Node> {
+        debug_assert!(
             !node.layers.is_empty(),
             "cannot commit a node with no layers"
         );
         let mut storage = self.storage.write().unwrap();
         let insert_idx = storage.data.len();
-
+        match placement {
+            Placement::First if !storage.data.is_empty() => return Err(node),
+            Placement::First | Placement::Linked => {
+                storage.nodes.push(node);
+                storage.dup_next.push(NO_DUP);
+            }
+            Placement::DuplicateOf(rep) => {
+                storage.nodes.push(Node { layers: Vec::new() });
+                let next = std::mem::replace(&mut storage.dup_next[rep], insert_idx);
+                storage.dup_next.push(next);
+            }
+        }
         storage.data.push(vec);
-        storage.nodes.push(node);
-        insert_idx
+        Ok(insert_idx)
     }
 
     fn publish(&self, idx: usize, max_lyr: usize, select_ctx: &mut SelectContext) {
@@ -654,14 +772,27 @@ where
             "node preallocation requires empty storage"
         );
         let mut out = Vec::with_capacity(vecs.len());
+        let mut first_copy = HashMap::with_capacity(vecs.len());
         for vec in vecs {
+            // one level draw per vector keeps the RNG in step with sequential inserts
             let (node, max_lyr) = self.new_node();
             let idx = storage.data.len();
-            storage.nodes.push(node);
             storage.data.push(*vec);
-
-            out.push((idx, max_lyr));
-            self.update_entry_point_if_required(idx, max_lyr);
+            match first_copy.entry(exact_key(vec)) {
+                Entry::Occupied(rep) => {
+                    let rep = *rep.get();
+                    storage.nodes.push(Node { layers: Vec::new() });
+                    let next = std::mem::replace(&mut storage.dup_next[rep], idx);
+                    storage.dup_next.push(next);
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(idx);
+                    storage.nodes.push(node);
+                    storage.dup_next.push(NO_DUP);
+                    out.push((idx, max_lyr));
+                    self.update_entry_point_if_required(idx, max_lyr);
+                }
+            }
         }
 
         out
@@ -780,13 +911,11 @@ where
             ep = self.search_layer_with_context(&storage, q, ep, lyr, 1, ctx)[0].node_index;
         }
 
-        // take k best from final layer search
-        let results: Vec<(usize, f32)> = self
-            .search_layer_with_context(&storage, q, ep, 0, ef_search.max(k), ctx)
-            .iter()
-            .take(k)
-            .map(|l| (l.node_index, l.distance))
-            .collect();
+        let results = top_k(
+            self.search_layer_with_context(&storage, q, ep, 0, ef_search.max(k), ctx),
+            k,
+            &storage.dup_next,
+        );
         if let Some(distance) = ctx.non_finite_distance {
             return Err(HnswError::NonFiniteDistance { distance });
         }
@@ -797,6 +926,7 @@ where
         let storage = self.storage.read().unwrap();
         size_of::<Self>()
             + storage.data.capacity() * size_of::<[f32; D]>()
+            + storage.dup_next.capacity() * size_of::<usize>()
             + nodes_heap_usage_bytes(&storage.nodes)
     }
 
