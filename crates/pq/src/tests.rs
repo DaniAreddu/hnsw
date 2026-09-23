@@ -69,3 +69,20 @@ fn encode_panics_before_training() {
 
     pq.encode(&[0.0; 4]);
 }
+
+#[test]
+fn kmeans_init_can_pick_every_unused_vector() {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    // Two identical vectors and one far away. Whichever vector k-means++
+    // starts from, the second centroid must be a vector not yet chosen, and
+    // [10, 10] must end up as a centroid.
+    let data = [0.0, 0.0, 0.0, 0.0, 10.0, 10.0];
+    for seed in 0..64 {
+        let centroids = KMeans::init_centroids(&data, 2, 2, 3, &mut StdRng::seed_from_u64(seed));
+        assert!(
+            centroids.chunks(2).any(|c| c == [10.0, 10.0]),
+            "seed {seed}: centroids {centroids:?} miss [10, 10]"
+        );
+    }
+}
