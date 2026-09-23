@@ -217,9 +217,6 @@ fn validate_config(config: &BenchFile) -> Result<(), &'static str> {
         if config.load_index_prefix.is_some() && params.build_mode.is_parallel() {
             return Err("parallel build modes cannot be used when loading an index");
         }
-        if config.save_index_prefix.is_some() && params.build_mode == BuildMode::Dynamic {
-            return Err("dynamic builds cannot be saved because their id mapping is not persisted");
-        }
         if config.save_index_prefix.is_some()
             && config.configs[..index].iter().any(|other| {
                 other.m == params.m
@@ -238,7 +235,9 @@ fn run<const DIM: usize, const Q: usize>(config: &BenchFile) -> Result<(), Box<d
     validate_config(config)?;
     let quantized = config.quantized;
     let data = dataset::load_bench_data::<DIM>(config)?;
-    let pq_data = quantized.map(|quantized| precompute_pq::<DIM, Q>(&data.base, quantized.pq_k));
+    let pq_data = quantized.map(|quantized| {
+        precompute_pq::<DIM, Q>(&data.base, quantized.pq_k, config.seed.unwrap_or(42))
+    });
     report::print_header(config, &data, quantized, pq_data.as_ref());
 
     let mut runs = config.output_json.as_ref().map(|_| {

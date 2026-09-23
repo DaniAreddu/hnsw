@@ -1,4 +1,4 @@
-use pq::ProductQuantizer;
+use hnsw_pq::ProductQuantizer;
 use rayon::prelude::*;
 
 use crate::{
@@ -7,7 +7,21 @@ use crate::{
 };
 use std::{cmp::Reverse, mem::size_of};
 
-#[allow(non_snake_case)]
+/// **Experimental** read-only HNSW graph whose vectors are replaced by product-
+/// quantization codes (`Q` bytes per vector instead of `4 * D`).
+///
+/// Built with [`Hnsw::freeze`], [`Hnsw::freeze_seeded`] or [`Hnsw::freeze_with_pq`]
+/// from a squared-L2 index, keeping that index's graph and ids.
+///
+/// What it does **not** do:
+/// - it keeps no original vectors, so there is no exact rescoring: reported
+///   distances are asymmetric (ADC) approximations of squared L2, and recall is
+///   bounded by the quantization (see [`FrozenPQHnsw::brute_force_adc`]);
+/// - it cannot be extended with new vectors;
+/// - it cannot be saved or loaded.
+///
+/// Available with the `experimental-pq` feature; not covered by the v0.1
+/// compatibility contract.
 pub struct FrozenPQHnsw<const D: usize, const Q: usize> {
     entry_point: usize,
     data: Vec<[u8; Q]>,
@@ -19,21 +33,17 @@ pub struct FrozenPQHnsw<const D: usize, const Q: usize> {
 }
 
 impl<const D: usize, const Q: usize> FrozenPQHnsw<D, Q> {
-    pub(crate) fn from_pq(
-        hnsw: Hnsw<D, L2Squared>,
-        quantized_data: Vec<[u8; Q]>,
-        pq: ProductQuantizer<Q, D>,
-    ) -> Self {
-        assert_eq!(
-            quantized_data.len(),
-            hnsw.storage.read().unwrap().nodes.len(),
-            "quantized data length must match HNSW index length"
+    fn from_pq(hnsw: Hnsw<D, L2Squared>, pq: ProductQuantizer<Q, D>) -> Self {
+        assert!(
+            pq.is_trained(),
+            "freeze_with_pq needs a trained ProductQuantizer"
         );
         let storage = hnsw.storage.into_inner().unwrap();
         let (entry_point, max_layer) = hnsw.entry.into_inner().unwrap();
+        let data = storage.data.par_iter().map(|v| pq.encode(v)).collect();
         Self {
             entry_point,
-            data: quantized_data,
+            data,
             nodes: storage.nodes,
             dup_next: storage.dup_next,
             ids: storage.ids,
@@ -42,16 +52,16 @@ impl<const D: usize, const Q: usize> FrozenPQHnsw<D, Q> {
         }
     }
 
-    pub(crate) fn from_hnsw(hnsw: Hnsw<D, L2Squared>, k: usize) -> Self {
+    fn from_hnsw(hnsw: Hnsw<D, L2Squared>, k: usize, seed: Option<u64>) -> Self {
         let mut pq: ProductQuantizer<Q, D> = ProductQuantizer::new(k);
-        let hnsw_data = std::mem::take(&mut hnsw.storage.write().unwrap().data);
-        pq.fit(&hnsw_data);
-
-        Self::from_pq(
-            hnsw,
-            hnsw_data.into_par_iter().map(|v| pq.encode(&v)).collect(),
-            pq,
-        )
+        {
+            let storage = hnsw.storage.read().unwrap();
+            match seed {
+                Some(seed) => pq.fit_seeded(&storage.data, seed),
+                None => pq.fit(&storage.data),
+            }
+        }
+        Self::from_pq(hnsw, pq)
     }
 
     fn search_layer_with_context<'a>(
@@ -111,30 +121,45 @@ impl<const D: usize, const Q: usize> FrozenPQHnsw<D, Q> {
         ctx.consume_best()
     }
 
+    /// Exhaustive ADC search over every code: the best any graph search over this
+    /// index can do. Returns `(id, approximate distance)` sorted like `search`.
     pub fn brute_force_adc(&self, q: &[f32; D], k: usize) -> Vec<(usize, f32)> {
         let adc = self.pq.adc_table(q);
         let mut distances: Vec<(usize, f32)> = self
             .data
             .iter()
-            .enumerate()
-            .map(|(id, code)| (id, self.pq.adc_distance(&adc, code)))
+            .zip(&self.ids)
+            .map(|(code, &id)| (id, self.pq.adc_distance(&adc, code)))
             .collect();
-        distances.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        distances.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         distances.truncate(k);
         distances
     }
 }
 
 impl<const D: usize> Hnsw<D, L2Squared> {
+    /// Trains a `Q`-subquantizer PQ with `k` centroids each on the stored vectors
+    /// (random seed) and converts the index into a [`FrozenPQHnsw`].
+    ///
+    /// # Panics
+    /// If `D` is not a multiple of `Q`, `k` is 0 or above 256, or the index holds
+    /// fewer than `k` vectors.
     pub fn freeze<const Q: usize>(self, k: usize) -> FrozenPQHnsw<D, Q> {
-        FrozenPQHnsw::from_hnsw(self, k)
+        FrozenPQHnsw::from_hnsw(self, k, None)
     }
-    pub fn freeze_with_pq<const Q: usize>(
-        self,
-        pq: ProductQuantizer<Q, D>,
-        quantized_data: Vec<[u8; Q]>,
-    ) -> FrozenPQHnsw<D, Q> {
-        FrozenPQHnsw::from_pq(self, quantized_data, pq)
+
+    /// [`Hnsw::freeze`] with reproducible PQ training.
+    pub fn freeze_seeded<const Q: usize>(self, k: usize, seed: u64) -> FrozenPQHnsw<D, Q> {
+        FrozenPQHnsw::from_hnsw(self, k, Some(seed))
+    }
+
+    /// Encodes the stored vectors with an already trained quantizer (for example
+    /// one trained on a sample) and converts the index into a [`FrozenPQHnsw`].
+    ///
+    /// # Panics
+    /// If `pq` is not trained.
+    pub fn freeze_with_pq<const Q: usize>(self, pq: ProductQuantizer<Q, D>) -> FrozenPQHnsw<D, Q> {
+        FrozenPQHnsw::from_pq(self, pq)
     }
 }
 

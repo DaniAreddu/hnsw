@@ -1,8 +1,6 @@
 use super::helpers::{duration_average, percentile, recall_at_k};
 use super::{BenchConfig, BenchFile, BuildMode, QuantizedConfig, dataset::BenchData};
-use hnsw::{Hnsw, HnswSearcher, L2Squared};
-use pq::ProductQuantizer;
-use rayon::prelude::*;
+use hnsw::{Hnsw, HnswSearcher, L2Squared, pq::ProductQuantizer};
 use std::{
     error::Error,
     hint::black_box,
@@ -20,9 +18,11 @@ pub(crate) struct IndexTimings {
     pub(crate) save_time: Option<Duration>,
     pub(crate) save_path: Option<String>,
     pub(crate) effective_build_threads: Option<usize>,
+    /// Time to encode the stored vectors when freezing into a PQ index.
+    pub(crate) pq_encode_time: Option<Duration>,
 }
 
-type PreparedIndex<const DIM: usize> = (Hnsw<DIM>, IndexTimings, Option<Vec<usize>>);
+type PreparedIndex<const DIM: usize> = (Hnsw<DIM>, IndexTimings);
 
 #[derive(Debug)]
 pub(crate) struct QueryMetrics {
@@ -46,31 +46,21 @@ pub(crate) struct Metrics {
 
 pub(crate) struct PqBenchData<const DIM: usize, const Q: usize> {
     pub(crate) pq: ProductQuantizer<Q, DIM>,
-    pub(crate) quantized_data: Vec<[u8; Q]>,
     pub(crate) fit_time: Duration,
-    pub(crate) encode_time: Duration,
 }
 
 pub(crate) fn precompute_pq<const DIM: usize, const Q: usize>(
     base: &[[f32; DIM]],
     pq_k: usize,
+    seed: u64,
 ) -> PqBenchData<DIM, Q> {
     let mut pq = ProductQuantizer::<Q, DIM>::new(pq_k);
 
     let fit_start = Instant::now();
-    pq.fit(base);
+    pq.fit_seeded(base, seed);
     let fit_time = fit_start.elapsed();
 
-    let encode_start = Instant::now();
-    let quantized_data = base.par_iter().map(|vector| pq.encode(vector)).collect();
-    let encode_time = encode_start.elapsed();
-
-    PqBenchData {
-        pq,
-        quantized_data,
-        fit_time,
-        encode_time,
-    }
+    PqBenchData { pq, fit_time }
 }
 
 pub(crate) fn run_benchmark<const DIM: usize, const Q: usize>(
@@ -81,19 +71,14 @@ pub(crate) fn run_benchmark<const DIM: usize, const Q: usize>(
     quantized: Option<QuantizedConfig>,
     pq_data: Option<&PqBenchData<DIM, Q>>,
 ) -> Result<Vec<SearchRun>, Box<dyn Error>> {
-    let (index, timings, id_mapping) = prepare_index(data, params, config)?;
-    let mapped_ground_truth = id_mapping
-        .as_deref()
-        .map(|mapping| remap_ground_truth(&data.ground_truth, mapping));
-    let ground_truth = mapped_ground_truth.as_deref().unwrap_or(&data.ground_truth);
+    let (index, mut timings) = prepare_index(data, params, config)?;
+    let ground_truth = &data.ground_truth;
 
     if let Some(quantized) = quantized {
         let pq_data = pq_data.ok_or("quantized benchmark is missing precomputed PQ data")?;
-        let quantized_data = id_mapping.as_deref().map_or_else(
-            || pq_data.quantized_data.clone(),
-            |mapping| remap_data(&pq_data.quantized_data, mapping),
-        );
-        let index = index.freeze_with_pq(pq_data.pq.clone(), quantized_data);
+        let encode_start = Instant::now();
+        let index = index.freeze_with_pq(pq_data.pq.clone());
+        timings.pq_encode_time = Some(encode_start.elapsed());
         let warmup = config.warmup_count(data.queries.len());
         let pq_oracle_recall = if quantized.pq_oracle {
             let measured_queries = data.queries.len() - warmup;
@@ -143,7 +128,7 @@ fn prepare_index<const DIM: usize>(
         .load_index_prefix
         .as_deref()
         .map(|prefix| params.index_path(prefix, DIM));
-    let (index, mut timings, id_mapping) = match &load_path {
+    let (index, mut timings) = match &load_path {
         Some(path) => {
             let load_start = Instant::now();
             let index = Hnsw::<DIM>::load(path)?;
@@ -166,8 +151,8 @@ fn prepare_index<const DIM: usize>(
                     save_time: None,
                     save_path: None,
                     effective_build_threads: None,
+                    pq_encode_time: None,
                 },
-                None,
             )
         }
         None => {
@@ -180,20 +165,21 @@ fn prepare_index<const DIM: usize>(
             );
 
             let build_start = Instant::now();
-            let id_mapping = match params.build_mode {
+            match params.build_mode {
                 BuildMode::Sequential => {
                     let mut insert_ctx = index.insert_context();
                     for &vector in base {
                         index.insert_with_context(vector, &mut insert_ctx);
                     }
-                    None
                 }
-                BuildMode::Dynamic => Some(index.extend_parallel(base, params.build_threads)),
-                BuildMode::Batched => {
-                    index.build_parallel(base, params.build_threads);
-                    None
-                }
-            };
+                // Explicit ids = dataset positions, so ground truth needs no remapping
+                // and the mapping is saved with the index.
+                BuildMode::Dynamic => index.extend_parallel_with_ids(
+                    &base.iter().copied().enumerate().collect::<Vec<_>>(),
+                    params.build_threads,
+                ),
+                BuildMode::Batched => index.build_parallel(base, params.build_threads),
+            }
             let build_time = build_start.elapsed();
             let insert_qps = base.len() as f64 / build_time.as_secs_f64();
             (
@@ -209,8 +195,8 @@ fn prepare_index<const DIM: usize>(
                         .build_mode
                         .is_parallel()
                         .then(|| effective_thread_count(params.build_threads)),
+                    pq_encode_time: None,
                 },
-                id_mapping,
             )
         }
     };
@@ -229,7 +215,7 @@ fn prepare_index<const DIM: usize>(
         timings.save_time = Some(save_start.elapsed());
     }
 
-    Ok((index, timings, id_mapping))
+    Ok((index, timings))
 }
 
 pub(crate) struct SearchRun {
@@ -289,34 +275,6 @@ fn measure_index<const DIM: usize, S: HnswSearcher<DIM>>(
         memory_bytes,
         pq_oracle_recall,
     }
-}
-
-fn remap_ground_truth(ground_truth: &[Vec<usize>], mapping: &[usize]) -> Vec<Vec<usize>> {
-    ground_truth
-        .iter()
-        .map(|neighbors| {
-            neighbors
-                .iter()
-                .map(|&id| {
-                    *mapping
-                        .get(id)
-                        .unwrap_or_else(|| panic!("ground-truth id {id} is out of bounds"))
-                })
-                .collect()
-        })
-        .collect()
-}
-
-fn remap_data<T: Copy>(data: &[T], mapping: &[usize]) -> Vec<T> {
-    assert_eq!(data.len(), mapping.len(), "id mapping length mismatch");
-    let mut remapped = data.to_vec();
-    for (original_id, &internal_id) in mapping.iter().enumerate() {
-        let destination = remapped
-            .get_mut(internal_id)
-            .unwrap_or_else(|| panic!("internal id {internal_id} is out of bounds"));
-        *destination = data[original_id];
-    }
-    remapped
 }
 
 fn effective_thread_count(requested: Option<NonZeroUsize>) -> usize {

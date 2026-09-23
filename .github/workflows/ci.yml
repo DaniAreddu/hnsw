@@ -30,7 +30,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - name: Install toolchain
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt && rustup default "$RUST_TOOLCHAIN"
       - run: cargo fmt --all --check
@@ -42,11 +41,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - name: Install toolchain
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # the workspace build enables experimental-pq through hnsw-bench; also lint
+      # the default feature set that library consumers get
+      - run: cargo clippy -p hnsw --all-targets --locked -- -D warnings
 
   test:
     name: test (${{ matrix.os }}, ${{ matrix.profile }})
@@ -61,7 +62,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - name: Install toolchain
         shell: bash
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
@@ -73,6 +73,9 @@ jobs:
       - name: cargo test
         shell: bash
         run: cargo test --workspace --locked ${{ matrix.profile == 'release' && '--release' || '' }}
+      - name: cargo test (hnsw, default features)
+        shell: bash
+        run: cargo test -p hnsw --locked ${{ matrix.profile == 'release' && '--release' || '' }}
 
   bench-smoke:
     runs-on: ubuntu-24.04
@@ -81,12 +84,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - name: Install toolchain
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Synthetic data only; SIFT/MNIST runs are manual (benchmarks/run.sh).
       - run: cargo run --release --locked -p hnsw-bench -- benchmarks/configs/smoke/synthetic-16d.toml
+      - run: cargo run --release --locked -p hnsw-bench -- benchmarks/configs/smoke/synthetic-16d-pq.toml
 
   bench-hdf5:
     # Lints the HDF5 dataset reader, which builds HDF5 from source (CMake).
@@ -96,7 +99,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - name: Install toolchain
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -109,10 +111,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - name: Install toolchain
         run: rustup toolchain install "$MSRV" --profile minimal && rustup default "$MSRV"
-      - run: cargo check -p hnsw --locked --all-targets
+      - run: cargo check -p hnsw --locked --all-targets --all-features
 
   deny:
     runs-on: ubuntu-24.04
@@ -121,7 +122,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: true
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-deny@0.20.2

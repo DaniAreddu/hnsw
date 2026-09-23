@@ -21,10 +21,7 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-# Temporary exception: the library still depends on the pq submodule through a
-# path-only dependency, which crates.io cannot resolve. The PQ packaging change
-# replaces it with a versioned workspace crate and restores "deny".
-wildcards = "warn"
+wildcards = "deny"
 # Workspace path dependencies carry no version requirement.
 allow-wildcard-paths = true
 
