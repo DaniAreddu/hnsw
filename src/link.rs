@@ -6,9 +6,12 @@ pub struct Link {
     pub distance: f32,
 }
 
+/// Links are totally ordered by `distance` (IEEE 754 `totalOrder`, so `-0.0 < 0.0`
+/// and NaNs have a fixed position), then by `node_index`. Equality is defined by
+/// the same ordering so `Eq`, `Ord` and heap tie-breaking always agree.
 impl PartialEq for Link {
     fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 impl Eq for Link {}
@@ -19,7 +22,9 @@ impl PartialOrd for Link {
 }
 impl Ord for Link {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.distance.total_cmp(&other.distance)
+        self.distance
+            .total_cmp(&other.distance)
+            .then_with(|| self.node_index.cmp(&other.node_index))
     }
 }
 
