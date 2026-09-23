@@ -62,7 +62,7 @@ The benchmark binary reads a TOML config, builds or loads the requested indexes,
 
 ```sh
 RUSTFLAGS="-C target-cpu=native" \
-  cargo run --release --bin bench -- benchmarks/configs/path/to/config.toml
+  cargo run --release -p hnsw-bench -- benchmarks/configs/path/to/config.toml
 ```
 
 Existing benchmark configs are organized under:

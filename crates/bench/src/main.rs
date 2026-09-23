@@ -1,10 +1,6 @@
-#[path = "bench/dataset.rs"]
 mod dataset;
-#[path = "bench/helpers.rs"]
 mod helpers;
-#[path = "bench/measurement.rs"]
 mod measurement;
-#[path = "bench/report.rs"]
 mod report;
 
 use measurement::{precompute_pq, run_benchmark};

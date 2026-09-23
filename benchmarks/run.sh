@@ -11,7 +11,7 @@ run_config() {
   (
     cd "$REPO_ROOT"
     RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}" \
-      cargo run --release --bin bench -- "$config"
+      cargo run --release -p hnsw-bench -- "$config"
   )
 }
 
