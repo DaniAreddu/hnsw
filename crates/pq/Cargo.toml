@@ -1,0 +1,15 @@
+[package]
+name = "hnsw-pq"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Product quantization (k-means codebooks, ADC/SDC) used by the hnsw crate's experimental PQ index"
+repository = "https://github.com/DaniAreddu/hnsw"
+readme = "README.md"
+keywords = ["product-quantization", "kmeans", "ann"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+rand = "0.10.1"
+rayon = "1.12.0"

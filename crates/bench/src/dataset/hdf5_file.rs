@@ -1,4 +1,5 @@
-use super::{BenchFile, helpers::compute_ground_truth};
+use super::BenchData;
+use crate::{BenchFile, helpers::compute_ground_truth};
 use hdf5::{Dataset, File};
 use std::error::Error;
 
@@ -6,19 +7,11 @@ const DEFAULT_BASE_DATASETS: &[&str] = &["train", "base"];
 const DEFAULT_QUERY_DATASETS: &[&str] = &["test", "query", "queries"];
 const DEFAULT_GROUND_TRUTH_DATASETS: &[&str] = &["neighbors", "knns", "groundtruth"];
 
-pub(crate) struct BenchData<const DIM: usize> {
-    pub(crate) base_name: String,
-    pub(crate) query_name: String,
-    pub(crate) base: Vec<[f32; DIM]>,
-    pub(crate) queries: Vec<[f32; DIM]>,
-    pub(crate) ground_truth: Vec<Vec<usize>>,
-    pub(crate) k: usize,
-}
-
-pub(crate) fn load_bench_data<const DIM: usize>(
+pub(crate) fn load<const DIM: usize>(
     config: &BenchFile,
+    path: &str,
 ) -> Result<BenchData<DIM>, Box<dyn Error>> {
-    let file = File::open(&config.dataset_path)?;
+    let file = File::open(path)?;
     let base_dataset_names = dataset_names(config.base_datasets.as_deref(), DEFAULT_BASE_DATASETS);
     let query_dataset_names =
         dataset_names(config.query_datasets.as_deref(), DEFAULT_QUERY_DATASETS);
@@ -73,10 +66,7 @@ fn dataset_names<'a>(configured: Option<&'a [String]>, defaults: &[&'a str]) -> 
         .unwrap_or_else(|| defaults.to_vec())
 }
 
-pub(crate) fn open_dataset(
-    file: &File,
-    candidates: &[&str],
-) -> Result<(String, Dataset), Box<dyn Error>> {
+fn open_dataset(file: &File, candidates: &[&str]) -> Result<(String, Dataset), Box<dyn Error>> {
     open_optional_dataset(file, candidates).ok_or_else(|| {
         format!(
             "could not find any dataset named one of: {}",
@@ -86,7 +76,7 @@ pub(crate) fn open_dataset(
     })
 }
 
-pub(crate) fn open_optional_dataset(file: &File, candidates: &[&str]) -> Option<(String, Dataset)> {
+fn open_optional_dataset(file: &File, candidates: &[&str]) -> Option<(String, Dataset)> {
     candidates.iter().find_map(|name| {
         file.dataset(name)
             .ok()
@@ -94,7 +84,7 @@ pub(crate) fn open_optional_dataset(file: &File, candidates: &[&str]) -> Option<
     })
 }
 
-pub(crate) fn load_vectors<const D: usize>(
+fn load_vectors<const D: usize>(
     dataset_name: &str,
     dataset: &Dataset,
     limit: Option<usize>,
@@ -126,7 +116,7 @@ pub(crate) fn load_vectors<const D: usize>(
     Ok(vectors)
 }
 
-pub(crate) fn load_ground_truth(
+fn load_ground_truth(
     dataset_name: &str,
     dataset: &Dataset,
     query_count: usize,

@@ -1,0 +1,30 @@
+# CI smoke check for the experimental PQ index on synthetic data.
+dimension = 16
+top_k = 10
+warmup_queries = 20
+query_cycles = 1
+seed = 42
+ef_searches = [64]
+min_recall = 0.6
+
+[synthetic]
+base = 5000
+queries = 200
+seed = 7
+
+[quantized]
+quantizers = 8
+pq_k = 64
+pq_oracle = true
+
+[[configs]]
+m = 12
+m0 = 24
+ef_construction = 100
+
+[[configs]]
+m = 12
+m0 = 24
+ef_construction = 100
+build_mode = "dynamic"
+build_threads = 2

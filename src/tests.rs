@@ -121,7 +121,7 @@ fn test_empty_graph() {
 }
 
 #[test]
-#[should_panic(expected = "ef_search must be > 0")]
+#[should_panic(expected = "invalid ef_search = 0: must be at least 1")]
 fn search_with_ef_rejects_zero_effort() {
     let index = Hnsw::<2>::new_default(2);
     index.search_with_ef(&[0.0, 0.0], 1, 0);
@@ -144,6 +144,7 @@ fn default_search_matches_explicit_default_ef() {
     );
 }
 
+#[cfg(feature = "experimental-pq")]
 #[test]
 fn pq_search_accepts_explicit_ef() {
     let index = Hnsw::<2>::new_seeded(4, 8, 16, 42, L2Squared);
@@ -184,17 +185,15 @@ fn stateful_distance_survives_save_load() {
     fs::remove_file(path).unwrap();
 }
 
+#[cfg(feature = "experimental-pq")]
 #[test]
-#[should_panic(expected = "quantized data length must match HNSW index length")]
-fn freeze_with_pq_rejects_mismatched_quantized_data() {
+#[should_panic(expected = "freeze_with_pq needs a trained ProductQuantizer")]
+fn freeze_with_pq_rejects_an_untrained_quantizer() {
     let hnsw = Hnsw::<1>::new_default(2);
     hnsw.insert([1.0]);
     hnsw.insert([2.0]);
 
-    let mut pq = pq::ProductQuantizer::<1, 1>::new(1);
-    pq.fit(&[[1.0], [2.0]]);
-
-    hnsw.freeze_with_pq(pq, vec![[0]]);
+    hnsw.freeze_with_pq(pq::ProductQuantizer::<1, 1>::new(1));
 }
 
 #[test]
@@ -273,8 +272,8 @@ fn test_avg_recall() {
     const M: usize = 16;
     const N_RECALL_QUERIES: usize = 1000;
 
-    let mut rng = rand::rng();
-    let knn = Hnsw::<DIMS>::new_default(M);
+    let mut rng = StdRng::seed_from_u64(0x5eed);
+    let knn = Hnsw::<DIMS>::new_seeded(M, 2 * M, 128, 42, L2Squared);
 
     for _ in 0..N {
         let v: [f32; DIMS] = (0..DIMS)
@@ -308,8 +307,8 @@ fn test_parallel_build_recall() {
     const M: usize = 16;
     const N_RECALL_QUERIES: usize = 1000;
 
-    let mut rng = rand::rng();
-    let mut knn = Hnsw::<DIMS>::new_default(M);
+    let mut rng = StdRng::seed_from_u64(0x5eed);
+    let mut knn = Hnsw::<DIMS>::new_seeded(M, 2 * M, 128, 42, L2Squared);
 
     let mut vecs = Vec::new();
     for _ in 0..N {

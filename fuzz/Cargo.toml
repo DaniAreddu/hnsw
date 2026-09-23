@@ -1,0 +1,23 @@
+[package]
+name = "hnsw-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+crc32fast = "1.5.0"
+libfuzzer-sys = "0.4"
+hnsw = { path = ".." }
+
+[[bin]]
+name = "load_snapshot"
+path = "fuzz_targets/load_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+# not part of the main workspace
+[workspace]

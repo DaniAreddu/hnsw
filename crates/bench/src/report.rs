@@ -7,7 +7,7 @@ use super::{
 use serde::Serialize;
 use std::{error::Error, fs, num::NonZeroUsize, path::Path, time::Duration};
 
-const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 2;
+const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize)]
 struct BenchmarkReport {
@@ -30,7 +30,6 @@ struct PqReport {
     quantizers: usize,
     pq_k: usize,
     fit_time_s: f64,
-    encode_time_s: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +59,7 @@ pub(crate) struct RunReport {
     build_threads: Option<usize>,
     effective_build_threads: Option<usize>,
     pq_oracle_recall: Option<f64>,
+    pq_encode_time_s: Option<f64>,
 }
 
 pub(crate) fn run_entry(
@@ -99,6 +99,7 @@ pub(crate) fn run_entry(
         },
         effective_build_threads: metrics.index.effective_build_threads,
         pq_oracle_recall: metrics.pq_oracle_recall,
+        pq_encode_time_s: duration_seconds(metrics.index.pq_encode_time),
     }
 }
 
@@ -112,7 +113,7 @@ pub(crate) fn write_json_report<const DIM: usize, const Q: usize>(
 ) -> Result<(), Box<dyn Error>> {
     let report = BenchmarkReport {
         schema_version: BENCHMARK_REPORT_SCHEMA_VERSION,
-        dataset_path: config.dataset_path.clone(),
+        dataset_path: config.dataset_label(),
         dimension: DIM,
         base_count: data.base.len(),
         query_count: data.queries.len(),
@@ -126,7 +127,6 @@ pub(crate) fn write_json_report<const DIM: usize, const Q: usize>(
                 quantizers: quantized.quantizers,
                 pq_k: quantized.pq_k,
                 fit_time_s: pq_data.fit_time.as_secs_f64(),
-                encode_time_s: pq_data.encode_time.as_secs_f64(),
             }),
             _ => None,
         },
@@ -152,7 +152,7 @@ pub(crate) fn print_header<const DIM: usize, const Q: usize>(
     quantized: Option<QuantizedConfig>,
     pq_data: Option<&PqBenchData<DIM, Q>>,
 ) {
-    println!("dataset: {}", config.dataset_path);
+    println!("dataset: {}", config.dataset_label());
     println!("base: {} ({} vectors)", data.base_name, data.base.len());
     println!(
         "queries: {} ({} vectors)",
@@ -165,7 +165,6 @@ pub(crate) fn print_header<const DIM: usize, const Q: usize>(
         println!("pq k: {}", quantized.pq_k);
         if let Some(pq_data) = pq_data {
             println!("pq fit: {:.3}s", pq_data.fit_time.as_secs_f64());
-            println!("pq encode: {:.3}s", pq_data.encode_time.as_secs_f64());
         }
     }
     println!("recall metric: recall@{}", data.k);

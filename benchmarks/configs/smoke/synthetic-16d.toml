@@ -1,0 +1,33 @@
+# CI smoke check: tiny seeded synthetic dataset, no external files.
+# Exercises every build mode and fails if any run drops below min_recall.
+dimension = 16
+top_k = 10
+warmup_queries = 20
+query_cycles = 1
+seed = 42
+ef_searches = [16, 64]
+min_recall = 0.88
+
+[synthetic]
+base = 5000
+queries = 200
+seed = 7
+
+[[configs]]
+m = 12
+m0 = 24
+ef_construction = 100
+
+[[configs]]
+m = 12
+m0 = 24
+ef_construction = 100
+build_mode = "batched"
+build_threads = 2
+
+[[configs]]
+m = 12
+m0 = 24
+ef_construction = 100
+build_mode = "dynamic"
+build_threads = 2

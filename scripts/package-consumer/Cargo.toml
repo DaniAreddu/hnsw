@@ -1,0 +1,15 @@
+[package]
+name = "hnsw-package-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Resolved against the extracted .crate archives by scripts/verify-package.sh,
+# which appends a [patch.crates-io] section; never against this repository.
+[dependencies]
+hnsw = "0.1.0"
+
+[features]
+pq = ["hnsw/experimental-pq"]
+
+[workspace]
