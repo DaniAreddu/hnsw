@@ -163,9 +163,10 @@ impl KMeans {
             return centroids;
         }
 
+        // indices (not float offsets) of the vectors already chosen as centroids
         let mut used = std::collections::HashSet::new();
-        let start = rng.random_range(0..n_vectors) * d;
-        centroids.extend_from_slice(&data[start..start + d]);
+        let start = rng.random_range(0..n_vectors);
+        centroids.extend_from_slice(&data[start * d..(start + 1) * d]);
         used.insert(start);
 
         for _ in 1..k {
@@ -189,8 +190,8 @@ impl KMeans {
                     .enumerate()
                     .find_map(|(i, _)| (!used.contains(&i)).then_some(i))
                     .expect("there must be an unused centroid candidate")
-            }) * d;
-            centroids.extend_from_slice(&data[idx..idx + d]);
+            });
+            centroids.extend_from_slice(&data[idx * d..(idx + 1) * d]);
             used.insert(idx);
         }
         centroids
