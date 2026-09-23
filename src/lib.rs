@@ -58,6 +58,7 @@ mod node;
 mod tests;
 
 pub use context::{InsertContext, SearchContext};
+pub use disk::{SNAPSHOT_FORMAT_VERSION, SnapshotError};
 pub use dist::{Distance, L2Squared, check_finite};
 pub use error::HnswError;
 

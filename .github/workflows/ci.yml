@@ -104,6 +104,24 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy -p hnsw-bench --features hdf5 --all-targets --locked -- -D warnings
 
+  fuzz:
+    # Bounded libFuzzer run of the snapshot loader; cargo-fuzz needs nightly.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      - run: cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --version 0.13.2 --locked
+      - run: cargo +"$FUZZ_TOOLCHAIN" fuzz run load_snapshot fuzz/corpus/load_snapshot -- -max_total_time=90 -rss_limit_mb=2048
+
   msrv:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -130,7 +148,7 @@ jobs:
   # Single required status for branch rules; fails if any job above did not succeed.
   ci-ok:
     if: always()
-    needs: [fmt, clippy, test, bench-smoke, bench-hdf5, msrv, deny]
+    needs: [fmt, clippy, test, bench-smoke, bench-hdf5, fuzz, msrv, deny]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

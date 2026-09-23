@@ -22,6 +22,20 @@ pub trait Distance<const D: usize> {
     fn validate(&self, v: &[f32; D]) -> Result<(), HnswError> {
         check_finite(v)
     }
+
+    /// Identity of the metric recorded in snapshots; loading a snapshot with a
+    /// different id fails with `SnapshotError::MetricMismatch`.
+    ///
+    /// The default is the Rust type name, which is unique but not guaranteed to
+    /// stay the same across compiler versions or crate renames (a change makes
+    /// old snapshots fail to load, never load as the wrong metric). Override it
+    /// with a fixed string for metrics whose snapshots must stay loadable.
+    fn metric_id() -> &'static str
+    where
+        Self: Sized,
+    {
+        std::any::type_name::<Self>()
+    }
 }
 
 /// Returns an error for the first NaN or infinite component of `v`.
@@ -52,6 +66,10 @@ impl L2Squared {
 }
 
 impl<const D: usize> Distance<D> for L2Squared {
+    fn metric_id() -> &'static str {
+        "hnsw::L2Squared"
+    }
+
     fn validate(&self, v: &[f32; D]) -> Result<(), HnswError> {
         check_finite(v)?;
         let limit = Self::component_limit(D);

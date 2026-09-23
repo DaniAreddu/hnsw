@@ -170,7 +170,10 @@ fn parallel_builds_validate_the_whole_batch_first() {
     assert_eq!(index.len(), 0);
 
     index.try_build_parallel(&[], None).unwrap();
-    assert_eq!(index.try_extend_parallel(&[], None).unwrap(), vec![]);
+    assert_eq!(
+        index.try_extend_parallel(&[], None).unwrap(),
+        Vec::<usize>::new()
+    );
     assert_eq!(index.len(), 0);
 
     vecs[5][1] = 0.0;
