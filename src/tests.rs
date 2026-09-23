@@ -273,8 +273,8 @@ fn test_avg_recall() {
     const M: usize = 16;
     const N_RECALL_QUERIES: usize = 1000;
 
-    let mut rng = rand::rng();
-    let knn = Hnsw::<DIMS>::new_default(M);
+    let mut rng = StdRng::seed_from_u64(0x5eed);
+    let knn = Hnsw::<DIMS>::new_seeded(M, 2 * M, 128, 42, L2Squared);
 
     for _ in 0..N {
         let v: [f32; DIMS] = (0..DIMS)
@@ -308,8 +308,8 @@ fn test_parallel_build_recall() {
     const M: usize = 16;
     const N_RECALL_QUERIES: usize = 1000;
 
-    let mut rng = rand::rng();
-    let mut knn = Hnsw::<DIMS>::new_default(M);
+    let mut rng = StdRng::seed_from_u64(0x5eed);
+    let mut knn = Hnsw::<DIMS>::new_seeded(M, 2 * M, 128, 42, L2Squared);
 
     let mut vecs = Vec::new();
     for _ in 0..N {
