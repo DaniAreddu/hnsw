@@ -13,6 +13,7 @@ pub struct FrozenPQHnsw<const D: usize, const Q: usize> {
     data: Vec<[u8; Q]>,
     nodes: Vec<Node>,
     dup_next: Vec<usize>,
+    ids: Vec<usize>,
     max_layer: usize,
     pq: ProductQuantizer<Q, D>,
 }
@@ -35,6 +36,7 @@ impl<const D: usize, const Q: usize> FrozenPQHnsw<D, Q> {
             data: quantized_data,
             nodes: storage.nodes,
             dup_next: storage.dup_next,
+            ids: storage.ids,
             max_layer,
             pq,
         }
@@ -158,7 +160,7 @@ impl<const D: usize, const Q: usize> HnswSearcher<D> for FrozenPQHnsw<D, Q> {
         }
 
         let results = self.search_layer_with_context(&adc, ep, 0, ef_search.max(k), ctx);
-        Ok(top_k(results, k, &self.dup_next))
+        Ok(top_k(results, k, &self.dup_next, &self.ids))
     }
 
     fn memory_usage_bytes(&self) -> usize {
@@ -166,6 +168,7 @@ impl<const D: usize, const Q: usize> HnswSearcher<D> for FrozenPQHnsw<D, Q> {
             + self.data.capacity() * size_of::<[u8; Q]>()
             + nodes_heap_usage_bytes(&self.nodes)
             + self.dup_next.capacity() * size_of::<usize>()
+            + self.ids.capacity() * size_of::<usize>()
             + self.pq.heap_usage_bytes()
     }
 
