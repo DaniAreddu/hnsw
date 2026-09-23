@@ -1,4 +1,5 @@
 use crate::kmeans::KMeans;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use std::mem::size_of;
 
@@ -33,18 +34,27 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
     }
 
     pub fn fit(&mut self, data: &[[f32; D]]) {
+        self.fit_with_rng(data, &mut rand::rng());
+    }
+
+    /// Samples the training set from `rng` and derives one independent seed per
+    /// subquantizer from it before training them in parallel, so the result does
+    /// not depend on thread scheduling.
+    fn fit_with_rng<R: Rng + ?Sized>(&mut self, data: &[[f32; D]], rng: &mut R) {
         assert!(!self.trained, "ProductQuantizer was already trained");
         assert!(data.len() >= self.k, "not enough vectors");
 
-        let data = self.sample_data(data);
+        let data = self.sample_data(data, rng);
+        let seeds: Vec<u64> = (0..M).map(|_| rng.next_u64()).collect();
         let codebooks = (0..M)
             .into_par_iter()
             .flat_map(|m| {
+                let mut rng = StdRng::seed_from_u64(seeds[m]);
                 let mut d: Vec<f32> = Vec::with_capacity(data.len() * self.subdims);
                 for v in data.iter() {
                     d.extend_from_slice(&v[self.subdim_range(m)]);
                 }
-                let mut q = KMeans::new_flat(d, self.k, self.subdims, data.len());
+                let mut q = KMeans::new_flat(d, self.k, self.subdims, data.len(), &mut rng);
                 q.train();
                 q.centroids
             })
@@ -137,9 +147,9 @@ impl<const M: usize, const D: usize> ProductQuantizer<M, D> {
         adc_table
     }
 
-    fn sample_data(&mut self, data: &[[f32; D]]) -> Vec<[f32; D]> {
+    fn sample_data<R: Rng + ?Sized>(&self, data: &[[f32; D]], rng: &mut R) -> Vec<[f32; D]> {
         let sample_size = data.len().min((256 * self.k).max(10_000));
-        let sampled = rand::seq::index::sample(&mut rand::rng(), data.len(), sample_size);
+        let sampled = rand::seq::index::sample(rng, data.len(), sample_size);
         sampled.into_iter().map(|i| data[i]).collect()
     }
 

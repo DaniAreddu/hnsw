@@ -1,4 +1,4 @@
-use rand::distr::Distribution;
+use rand::{Rng, RngExt, distr::Distribution};
 
 use crate::{closest_centroid, l2_squared};
 
@@ -31,13 +31,19 @@ impl KMeans {
         }
     }
 
-    pub fn new_flat(data: Vec<f32>, k: usize, dims: usize, n_vectors: usize) -> Self {
+    pub fn new_flat<R: Rng + ?Sized>(
+        data: Vec<f32>,
+        k: usize,
+        dims: usize,
+        n_vectors: usize,
+        rng: &mut R,
+    ) -> Self {
         assert!(k <= 256, "k must fit in an u8");
         assert!(n_vectors >= k, "not enough vectors");
         assert!(data.len() / n_vectors == dims, "mismatched dimensions");
 
         Self {
-            centroids: Self::init_centroids(&data, k, dims, n_vectors),
+            centroids: Self::init_centroids(&data, k, dims, n_vectors, rng),
             cluster_mappings: vec![0; n_vectors],
             data,
             k,
@@ -48,25 +54,25 @@ impl KMeans {
     }
 
     #[allow(dead_code)]
-    pub fn new(data: Vec<Vec<f32>>, k: usize, dims: usize) -> Self {
+    pub fn new<R: Rng + ?Sized>(data: Vec<Vec<f32>>, k: usize, dims: usize, rng: &mut R) -> Self {
         assert!(k <= 256, "k must fit in an u8");
         assert!(data.len() >= k, "not enough vectors");
         assert!(data[0].len() == dims, "mismatched dimensions");
 
         let n_vectors = data.len();
         let data: Vec<f32> = data.into_iter().flatten().collect();
-        Self::new_flat(data, k, dims, n_vectors)
+        Self::new_flat(data, k, dims, n_vectors, rng)
     }
 
     #[allow(dead_code)]
-    pub fn add_batch(&mut self, data: Vec<Vec<f32>>) {
+    pub fn add_batch<R: Rng + ?Sized>(&mut self, data: Vec<Vec<f32>>, rng: &mut R) {
         assert!(self.n_vectors + data.len() >= self.k, "not enough vectors");
         assert!(data[0].len() == self.dims, "mismatched dimensions");
         assert!(!self.trained, "quantizer already trained");
 
         self.n_vectors += data.len();
         self.data.extend(data.into_iter().flatten());
-        self.centroids = Self::init_centroids(&self.data, self.k, self.dims, self.n_vectors);
+        self.centroids = Self::init_centroids(&self.data, self.k, self.dims, self.n_vectors, rng);
         self.cluster_mappings = vec![0; self.data.len()];
     }
 
@@ -139,7 +145,13 @@ impl KMeans {
         closest_centroid(&self.centroids, self.dims, q)
     }
 
-    fn init_centroids(data: &[f32], k: usize, d: usize, n_vectors: usize) -> Vec<f32> {
+    pub(crate) fn init_centroids<R: Rng + ?Sized>(
+        data: &[f32],
+        k: usize,
+        d: usize,
+        n_vectors: usize,
+        rng: &mut R,
+    ) -> Vec<f32> {
         assert!(n_vectors >= k, "not enough vectors");
         let mut centroids = Vec::with_capacity(k * d);
 
@@ -152,7 +164,7 @@ impl KMeans {
         }
 
         let mut used = std::collections::HashSet::new();
-        let start = rand::random_range(0..n_vectors) * d;
+        let start = rng.random_range(0..n_vectors) * d;
         centroids.extend_from_slice(&data[start..start + d]);
         used.insert(start);
 
@@ -172,7 +184,7 @@ impl KMeans {
                         .unwrap_or(0f32)
                 })
                 .collect();
-            let idx = sample_from_weights(&weights).unwrap_or_else(|| {
+            let idx = sample_from_weights(&weights, rng).unwrap_or_else(|| {
                 data.chunks(d)
                     .enumerate()
                     .find_map(|(i, _)| (!used.contains(&i)).then_some(i))
@@ -185,8 +197,7 @@ impl KMeans {
     }
 }
 
-fn sample_from_weights(weights: &[f32]) -> Option<usize> {
-    let mut rng = rand::rng();
+fn sample_from_weights<R: Rng + ?Sized>(weights: &[f32], rng: &mut R) -> Option<usize> {
     let dist = rand::distr::weighted::WeightedIndex::new(weights).ok()?;
-    Some(dist.sample(&mut rng))
+    Some(dist.sample(rng))
 }

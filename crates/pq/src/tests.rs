@@ -30,7 +30,7 @@ fn l2_squared_returns_sum_of_squared_differences() {
 
 #[test]
 fn kmeans_with_one_cluster_converges_to_mean() {
-    let mut kmeans = KMeans::new(vec![vec![1.0, 2.0], vec![3.0, 4.0]], 1, 2);
+    let mut kmeans = KMeans::new(vec![vec![1.0, 2.0], vec![3.0, 4.0]], 1, 2, &mut rand::rng());
 
     kmeans.train();
     let (idx, centroid) = kmeans.encode(&[2.0, 3.0]);
@@ -50,6 +50,7 @@ fn kmeans_separates_two_clear_clusters() {
         ],
         2,
         2,
+        &mut rand::rng(),
     );
 
     kmeans.train();
