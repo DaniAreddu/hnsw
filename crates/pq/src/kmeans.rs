@@ -16,21 +16,6 @@ impl KMeans {
     const MAX_ITERS: usize = 50;
     const MIN_MOVEMENT: f32 = 1e-5;
 
-    #[allow(dead_code)]
-    pub fn empty(k: usize, dims: usize) -> Self {
-        assert!(k <= 256, "k must fit in an u8");
-        assert!(k > 0, "k must be greater than zero");
-        Self {
-            centroids: Vec::new(),
-            data: Vec::new(),
-            cluster_mappings: Vec::new(),
-            k,
-            dims,
-            n_vectors: 0,
-            trained: false,
-        }
-    }
-
     pub fn new_flat<R: Rng + ?Sized>(
         data: Vec<f32>,
         k: usize,
@@ -62,18 +47,6 @@ impl KMeans {
         let n_vectors = data.len();
         let data: Vec<f32> = data.into_iter().flatten().collect();
         Self::new_flat(data, k, dims, n_vectors, rng)
-    }
-
-    #[allow(dead_code)]
-    pub fn add_batch<R: Rng + ?Sized>(&mut self, data: Vec<Vec<f32>>, rng: &mut R) {
-        assert!(self.n_vectors + data.len() >= self.k, "not enough vectors");
-        assert!(data[0].len() == self.dims, "mismatched dimensions");
-        assert!(!self.trained, "quantizer already trained");
-
-        self.n_vectors += data.len();
-        self.data.extend(data.into_iter().flatten());
-        self.centroids = Self::init_centroids(&self.data, self.k, self.dims, self.n_vectors, rng);
-        self.cluster_mappings = vec![0; self.data.len()];
     }
 
     pub fn train(&mut self) {
