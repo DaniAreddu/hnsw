@@ -5,10 +5,13 @@ use std::{
 
 use crate::link::Link;
 
+/// Reusable scratch buffers for searches; see [`crate::HnswSearcher::search_context`].
 pub struct SearchContext {
     pub(crate) frontier: BinaryHeap<Reverse<Link>>,
     pub(crate) best: BinaryHeap<Link>,
     pub(crate) visited: VisitedSet,
+    /// First non-finite distance seen since the caller last reset it.
+    pub(crate) non_finite_distance: Option<f32>,
     results: Vec<Link>,
 }
 
@@ -19,6 +22,7 @@ pub(crate) struct SelectContext {
     pub(crate) visited: VisitedSet,
 }
 
+/// Reusable scratch buffers for insertion; see [`crate::Hnsw::insert_context`].
 pub struct InsertContext {
     pub(crate) select_ctx: SelectContext,
     pub(crate) search_ctx: SearchContext,
@@ -44,6 +48,7 @@ impl SearchContext {
             best: BinaryHeap::with_capacity(cap),
             results: Vec::with_capacity(cap),
             visited,
+            non_finite_distance: None,
         }
     }
 

@@ -2,8 +2,8 @@ use pq::ProductQuantizer;
 use rayon::prelude::*;
 
 use crate::{
-    Hnsw, HnswSearcher, L2Squared, context::SearchContext, link::Link, node::Node,
-    nodes_heap_usage_bytes,
+    Distance, Hnsw, HnswError, HnswSearcher, L2Squared, check_ef_search, context::SearchContext,
+    link::Link, node::Node, nodes_heap_usage_bytes,
 };
 use std::{cmp::Reverse, mem::size_of};
 
@@ -133,36 +133,32 @@ impl<const D: usize> Hnsw<D, L2Squared> {
 }
 
 impl<const D: usize, const Q: usize> HnswSearcher<D> for FrozenPQHnsw<D, Q> {
-    fn search_with_context(
+    fn try_search_with_context(
         &self,
         q: &[f32; D],
         k: usize,
         ef_search: usize,
         ctx: &mut SearchContext,
-    ) -> Vec<(usize, f32)> {
-        assert!(ef_search > 0, "ef_search must be > 0");
-        if self.is_empty() {
-            return Vec::new();
+    ) -> Result<Vec<(usize, f32)>, HnswError> {
+        check_ef_search(ef_search)?;
+        L2Squared.validate(q)?;
+        if k == 0 || self.is_empty() {
+            return Ok(Vec::new());
         }
 
         let adc = self.pq.adc_table(q);
         let mut ep = self.entry_point;
         for lyr in (1..=self.max_layer).rev() {
-            ep = self
-                .search_layer_with_context(&adc, ep, lyr, 1, ctx)
-                .first()
-                .unwrap_or_else(|| {
-                    panic!("ERROR: search_layer@{lyr} returned an empty array (search)")
-                })
-                .node_index;
+            // a layer search always returns at least its entry point
+            ep = self.search_layer_with_context(&adc, ep, lyr, 1, ctx)[0].node_index;
         }
 
         let results = self.search_layer_with_context(&adc, ep, 0, ef_search.max(k), ctx);
         // take k best from final layer search
-        results[..k.min(results.len())]
+        Ok(results[..k.min(results.len())]
             .iter()
             .map(|l| (l.node_index, l.distance))
-            .collect()
+            .collect())
     }
 
     fn memory_usage_bytes(&self) -> usize {
