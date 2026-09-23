@@ -1,3 +1,33 @@
+//! Hierarchical Navigable Small World (HNSW) approximate nearest-neighbor index
+//! over fixed-size `[f32; D]` vectors.
+//!
+//! ```
+//! use hnsw::{Hnsw, HnswError, HnswSearcher, L2Squared};
+//!
+//! # fn main() -> Result<(), HnswError> {
+//! // M = 16 links per node, M0 = 32 on layer 0, ef_construction = 128, seed = 42
+//! let index = Hnsw::<2>::try_new_seeded(16, 32, 128, 42, L2Squared)?;
+//! index.try_insert([0.0, 0.0])?;
+//! index.try_insert([3.0, 3.0])?;
+//! index.try_insert([4.0, 4.0])?;
+//!
+//! // (id, squared distance), nearest first
+//! let hits = index.try_search_with_ef(&[1.0, 1.0], 2, 32)?;
+//! assert_eq!(hits, vec![(0, 2.0), (1, 8.0)]);
+//!
+//! // invalid input is an error, not a panic or a corrupted graph
+//! assert!(matches!(
+//!     index.try_insert([f32::NAN, 0.0]),
+//!     Err(HnswError::NonFiniteComponent { component: 0, .. })
+//! ));
+//! assert!(index.try_search_with_ef(&[1.0, 1.0], 2, 0).is_err());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Every panicking method (`new`, `insert`, `search`, ...) has a `try_*`
+//! counterpart and panics only where that counterpart returns an error.
+
 use rand::{distr::Open01, prelude::*};
 
 use crate::{
