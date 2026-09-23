@@ -38,7 +38,14 @@ impl Serialize for Scaled {
         if self.fail {
             return Err(serde::ser::Error::custom("refusing to serialize"));
         }
-        serializer.serialize_f32(self.factor)
+        #[derive(Serialize)]
+        struct Repr {
+            factor: f32,
+        }
+        Repr {
+            factor: self.factor,
+        }
+        .serialize(serializer)
     }
 }
 

@@ -1,10 +1,8 @@
 use std::sync::RwLock;
 
-use serde::{Deserialize, Serialize};
-
 use crate::link::Link;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Node {
     pub layers: Vec<RwLock<Vec<Link>>>,
 }
