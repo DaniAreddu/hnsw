@@ -99,10 +99,23 @@ jobs:
         run: rustup toolchain install "$MSRV" --profile minimal && rustup default "$MSRV"
       - run: cargo check -p hnsw --locked --all-targets
 
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check
+
   # Single required status for branch rules; fails if any job above did not succeed.
   ci-ok:
     if: always()
-    needs: [fmt, clippy, test, bench-smoke, msrv]
+    needs: [fmt, clippy, test, bench-smoke, msrv, deny]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
