@@ -64,6 +64,28 @@ pub const MAX_EF_CONSTRUCTION: usize = 1 << 16;
 /// Search effort used by [`HnswSearcher::search`] and [`HnswSearcher::try_search`].
 pub const DEFAULT_EF_SEARCH: usize = 32;
 
+/// An HNSW index over `[f32; D]` vectors with distance metric `DS`.
+///
+/// # Ids
+/// Each inserted vector gets the next insertion position as its id (`0, 1, ...`).
+///
+/// # Concurrency
+/// Searches and inserts may run concurrently through `&Hnsw`. Once an insert call
+/// has returned, its vector is fully linked and later searches can find it
+/// (subject to the usual approximate recall); a search that overlaps an insert
+/// may or may not see it. `len()` counts vectors as soon
+/// as they are stored, which can be slightly before they are reachable.
+///
+/// # Determinism
+/// With a fixed seed, sequential inserts in a fixed order always build the same
+/// graph, also across save/load. `build_parallel` and `extend_parallel` depend
+/// on thread scheduling and are not reproducible.
+///
+/// # Duplicates
+/// A vector equal to an existing vector found by the insertion search is stored
+/// with its own id but shares that vector's graph node, so every copy is
+/// returned together. Copies inserted concurrently may instead become separate
+/// graph nodes.
 #[allow(non_snake_case)]
 pub struct Hnsw<const D: usize, DS = L2Squared> {
     M: usize,
