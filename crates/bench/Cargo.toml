@@ -17,7 +17,7 @@ hdf5 = ["dep:hdf5", "dep:hdf5-sys"]
 
 [dependencies]
 hnsw = { path = "../.." }
-pq = { path = "../../pq" }
+pq = { package = "hnsw-pq", path = "../pq" }
 hdf5 = { version = "0.8.1", optional = true }
 hdf5-sys = { version = "0.8.1", features = ["static"], optional = true }
 rand = "0.10.1"
