@@ -235,7 +235,6 @@ dependencies = [
  "hdf5",
  "hdf5-sys",
  "hnsw",
- "hnsw-pq",
  "rand",
  "rayon",
  "serde",

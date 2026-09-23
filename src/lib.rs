@@ -50,6 +50,7 @@ mod context;
 mod disk;
 mod dist;
 mod error;
+#[cfg(feature = "experimental-pq")]
 mod frozen_pq_index;
 mod link;
 mod node;
@@ -59,6 +60,17 @@ mod tests;
 pub use context::{InsertContext, SearchContext};
 pub use dist::{Distance, L2Squared, check_finite};
 pub use error::HnswError;
+
+/// **Experimental** product-quantized index (`experimental-pq` feature).
+///
+/// Not covered by the v0.1 compatibility contract: [`pq::FrozenPQHnsw`] keeps no
+/// original vectors (no exact rescoring), cannot be extended, and cannot be
+/// saved or loaded.
+#[cfg(feature = "experimental-pq")]
+pub mod pq {
+    pub use crate::frozen_pq_index::FrozenPQHnsw;
+    pub use hnsw_pq::{ProductQuantizer, sdc_distance};
+}
 
 /// Largest accepted `M` and `M0`.
 pub const MAX_CONNECTIONS: usize = 4096;

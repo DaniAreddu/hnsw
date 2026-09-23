@@ -144,6 +144,7 @@ fn default_search_matches_explicit_default_ef() {
     );
 }
 
+#[cfg(feature = "experimental-pq")]
 #[test]
 fn pq_search_accepts_explicit_ef() {
     let index = Hnsw::<2>::new_seeded(4, 8, 16, 42, L2Squared);
@@ -184,17 +185,15 @@ fn stateful_distance_survives_save_load() {
     fs::remove_file(path).unwrap();
 }
 
+#[cfg(feature = "experimental-pq")]
 #[test]
-#[should_panic(expected = "quantized data length must match HNSW index length")]
-fn freeze_with_pq_rejects_mismatched_quantized_data() {
+#[should_panic(expected = "freeze_with_pq needs a trained ProductQuantizer")]
+fn freeze_with_pq_rejects_an_untrained_quantizer() {
     let hnsw = Hnsw::<1>::new_default(2);
     hnsw.insert([1.0]);
     hnsw.insert([2.0]);
 
-    let mut pq = pq::ProductQuantizer::<1, 1>::new(1);
-    pq.fit(&[[1.0], [2.0]]);
-
-    hnsw.freeze_with_pq(pq, vec![[0]]);
+    hnsw.freeze_with_pq(pq::ProductQuantizer::<1, 1>::new(1));
 }
 
 #[test]
