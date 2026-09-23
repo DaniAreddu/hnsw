@@ -1,0 +1,9 @@
+[package]
+name = "pq"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+rand = "0.10.1"
+rayon = "1.12.0"
