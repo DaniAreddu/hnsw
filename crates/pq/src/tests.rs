@@ -125,3 +125,56 @@ fn seeded_training_is_reproducible_across_thread_counts() {
         "different seeds should give different codebooks"
     );
 }
+
+fn mse(pq: &ProductQuantizer<4, 16>, data: &[[f32; 16]]) -> f32 {
+    data.iter()
+        .map(|v| l2_squared(v, &pq.decode(&pq.encode(v))))
+        .sum::<f32>()
+        / data.len() as f32
+}
+
+/// Recall@10 of brute-force ADC ranking against exact L2 ranking.
+fn adc_recall(pq: &ProductQuantizer<4, 16>, base: &[[f32; 16]], queries: &[[f32; 16]]) -> f64 {
+    let codes: Vec<[u8; 4]> = base.iter().map(|v| pq.encode(v)).collect();
+    let top10 = |score: &dyn Fn(usize) -> f32| {
+        let mut ids: Vec<usize> = (0..base.len()).collect();
+        ids.sort_by(|&a, &b| score(a).total_cmp(&score(b)).then(a.cmp(&b)));
+        ids.truncate(10);
+        ids
+    };
+    let mut hits = 0;
+    for q in queries {
+        let table = pq.adc_table(q);
+        let exact = top10(&|i| l2_squared(q, &base[i]));
+        let approx = top10(&|i| pq.adc_distance(&table, &codes[i]));
+        hits += approx.iter().filter(|id| exact.contains(id)).count();
+    }
+    hits as f64 / (queries.len() * 10) as f64
+}
+
+#[test]
+fn quantization_quality_against_exact_baseline() {
+    let base = clustered(2_000, 2);
+    let queries = clustered(50, 3);
+    let mut coarse = ProductQuantizer::<4, 16>::new(1);
+    coarse.fit_seeded(&base, 1);
+    let mut fine = ProductQuantizer::<4, 16>::new(64);
+    fine.fit_seeded(&base, 1);
+    let (mse_coarse, mse_fine) = (mse(&coarse, &base), mse(&fine, &base));
+    // k = 1 can only reconstruct the mean; 64 centroids per 4-D subspace must do
+    // far better, and better than knowing only the 8 cluster centers (the
+    // within-cluster noise has total variance 16 * 1/3).
+    assert!(
+        mse_fine < 0.01 * mse_coarse,
+        "mse {mse_fine} vs {mse_coarse}"
+    );
+    assert!(mse_fine < 16.0 / 3.0, "mse {mse_fine}");
+
+    // ADC ranking vs exact L2 ranking; measured 0.46 for k = 64.
+    let (recall_coarse, recall_fine) = (
+        adc_recall(&coarse, &base, &queries),
+        adc_recall(&fine, &base, &queries),
+    );
+    assert!(recall_coarse <= 0.05, "k=1 recall {recall_coarse}");
+    assert!(recall_fine >= 0.35, "k=64 recall {recall_fine}");
+}
