@@ -112,7 +112,7 @@ pub(crate) fn write_json_report<const DIM: usize, const Q: usize>(
 ) -> Result<(), Box<dyn Error>> {
     let report = BenchmarkReport {
         schema_version: BENCHMARK_REPORT_SCHEMA_VERSION,
-        dataset_path: config.dataset_path.clone(),
+        dataset_path: config.dataset_label(),
         dimension: DIM,
         base_count: data.base.len(),
         query_count: data.queries.len(),
@@ -152,7 +152,7 @@ pub(crate) fn print_header<const DIM: usize, const Q: usize>(
     quantized: Option<QuantizedConfig>,
     pq_data: Option<&PqBenchData<DIM, Q>>,
 ) {
-    println!("dataset: {}", config.dataset_path);
+    println!("dataset: {}", config.dataset_label());
     println!("base: {} ({} vectors)", data.base_name, data.base.len());
     println!(
         "queries: {} ({} vectors)",

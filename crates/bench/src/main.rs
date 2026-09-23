@@ -12,7 +12,8 @@ const DEFAULT_CONFIG_PATH: &str = "bench-config.toml";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchFile {
-    pub(crate) dataset_path: String,
+    pub(crate) dataset_path: Option<String>,
+    pub(crate) synthetic: Option<SyntheticConfig>,
     pub(crate) dimension: usize,
     pub(crate) top_k: usize,
     pub(crate) warmup_queries: usize,
@@ -22,14 +23,18 @@ pub(crate) struct BenchFile {
     pub(crate) load_index_prefix: Option<String>,
     pub(crate) save_index_prefix: Option<String>,
     pub(crate) seed: Option<u64>,
+    #[cfg_attr(not(feature = "hdf5"), allow(dead_code))]
     pub(crate) base_datasets: Option<Vec<String>>,
+    #[cfg_attr(not(feature = "hdf5"), allow(dead_code))]
     pub(crate) query_datasets: Option<Vec<String>>,
+    #[cfg_attr(not(feature = "hdf5"), allow(dead_code))]
     pub(crate) ground_truth_datasets: Option<Vec<String>>,
     pub(crate) ef_searches: Vec<usize>,
     pub(crate) output_json: Option<String>,
     pub(crate) quantized: Option<QuantizedConfig>,
     #[serde(default = "default_build_repetitions")]
     pub(crate) build_repetitions: usize,
+    pub(crate) min_recall: Option<f64>,
     pub(crate) configs: Vec<BenchConfig>,
 }
 
@@ -54,6 +59,14 @@ impl BuildMode {
     pub(crate) fn is_parallel(self) -> bool {
         !matches!(self, Self::Sequential)
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyntheticConfig {
+    pub(crate) base: usize,
+    pub(crate) queries: usize,
+    pub(crate) seed: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -86,6 +99,17 @@ impl BenchConfig {
 }
 
 impl BenchFile {
+    pub(crate) fn dataset_label(&self) -> String {
+        match (&self.dataset_path, self.synthetic) {
+            (Some(path), _) => path.clone(),
+            (None, Some(synthetic)) => format!(
+                "synthetic(base={}, queries={}, seed={})",
+                synthetic.base, synthetic.queries, synthetic.seed
+            ),
+            (None, None) => "<none>".to_owned(),
+        }
+    }
+
     pub(crate) fn query_cycles(&self) -> usize {
         self.query_cycles.unwrap_or(1).max(1)
     }
@@ -107,10 +131,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // TODO: find some better way of doing this
     match config.dimension {
+        16 => run_dimension::<16>(&config),
         128 => run_dimension::<128>(&config),
         784 => run_dimension::<784>(&config),
         dimension => Err(format!(
-            "unsupported dimension {}; add a match arm in src/bin/bench.rs",
+            "unsupported dimension {}; add a match arm in crates/bench/src/main.rs",
             dimension
         )
         .into()),
@@ -121,6 +146,8 @@ fn run_dimension<const DIM: usize>(config: &BenchFile) -> Result<(), Box<dyn Err
     match config.quantized {
         None => run::<DIM, 0>(config),
         Some(quantized) => match quantized.quantizers {
+            4 if DIM == 16 => run::<DIM, 4>(config),
+            8 if DIM == 16 => run::<DIM, 8>(config),
             32 => run::<DIM, 32>(config),
             64 => run::<DIM, 64>(config),
             128 if DIM == 128 => run::<DIM, 128>(config),
@@ -132,6 +159,7 @@ fn run_dimension<const DIM: usize>(config: &BenchFile) -> Result<(), Box<dyn Err
 
 fn unsupported_quantizers(dimension: usize, quantizers: usize) -> String {
     let supported = match dimension {
+        16 => "4, 8",
         128 => "32, 64, 128",
         784 => "32, 64, 196",
         _ => "none",
@@ -142,6 +170,21 @@ fn unsupported_quantizers(dimension: usize, quantizers: usize) -> String {
 }
 
 fn validate_config(config: &BenchFile) -> Result<(), &'static str> {
+    match (&config.dataset_path, config.synthetic) {
+        (Some(_), Some(_)) => return Err("set either dataset_path or synthetic, not both"),
+        (None, None) => return Err("one of dataset_path or synthetic is required"),
+        (None, Some(synthetic)) if synthetic.base == 0 || synthetic.queries == 0 => {
+            return Err("synthetic base and queries must be greater than zero");
+        }
+        _ => {}
+    }
+    if config
+        .min_recall
+        .is_some_and(|recall| !(0.0..=1.0).contains(&recall))
+    {
+        return Err("min_recall must be within 0.0..=1.0");
+    }
+
     if config.configs.is_empty() {
         return Err("configs must contain at least one graph configuration");
     }
@@ -208,6 +251,7 @@ fn run<const DIM: usize, const Q: usize>(config: &BenchFile) -> Result<(), Box<d
         )
     });
 
+    let mut lowest_recall: Option<(f64, BenchConfig, usize)> = None;
     for params in config.configs.iter().copied() {
         for repetition in 0..config.build_repetitions {
             let metrics = run_benchmark::<DIM, Q>(
@@ -227,6 +271,9 @@ fn run<const DIM: usize, const Q: usize>(config: &BenchFile) -> Result<(), Box<d
                     &run.metrics,
                     run_index == 0,
                 );
+                if lowest_recall.is_none_or(|(recall, _, _)| run.metrics.query.recall < recall) {
+                    lowest_recall = Some((run.metrics.query.recall, params, run.ef_search));
+                }
                 if let Some(runs) = &mut runs {
                     runs.push(report::run_entry(
                         params,
@@ -249,6 +296,17 @@ fn run<const DIM: usize, const Q: usize>(config: &BenchFile) -> Result<(), Box<d
             runs.expect("JSON output should initialize report runs"),
         )?;
         println!("wrote benchmark JSON: {output_json}");
+    }
+
+    if let (Some(min_recall), Some((recall, params, ef_search))) =
+        (config.min_recall, lowest_recall)
+        && recall < min_recall
+    {
+        return Err(format!(
+            "recall@{} {recall:.4} for M={} M0={} ef_construction={} ef_search={ef_search} is below min_recall {min_recall:.4}",
+            data.k, params.m, params.m0, params.ef_construction
+        )
+        .into());
     }
 
     Ok(())
