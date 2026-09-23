@@ -121,7 +121,7 @@ fn test_empty_graph() {
 }
 
 #[test]
-#[should_panic(expected = "ef_search must be > 0")]
+#[should_panic(expected = "invalid ef_search = 0: must be at least 1")]
 fn search_with_ef_rejects_zero_effort() {
     let index = Hnsw::<2>::new_default(2);
     index.search_with_ef(&[0.0, 0.0], 1, 0);

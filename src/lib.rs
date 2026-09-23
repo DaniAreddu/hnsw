@@ -1,7 +1,7 @@
 use rand::{distr::Open01, prelude::*};
 
 use crate::{
-    context::{InsertContext, SearchContext, SelectContext},
+    context::SelectContext,
     link::Link,
     node::{Node, nodes_heap_usage_bytes},
 };
@@ -15,13 +15,23 @@ use std::{
 mod context;
 mod disk;
 mod dist;
+mod error;
 mod frozen_pq_index;
 mod link;
 mod node;
 #[cfg(test)]
 mod tests;
 
-pub use dist::{Distance, L2Squared};
+pub use context::{InsertContext, SearchContext};
+pub use dist::{Distance, L2Squared, check_finite};
+pub use error::HnswError;
+
+/// Largest accepted `M` and `M0`.
+pub const MAX_CONNECTIONS: usize = 4096;
+/// Largest accepted `ef_construction`.
+pub const MAX_EF_CONSTRUCTION: usize = 1 << 16;
+/// Search effort used by [`HnswSearcher::search`] and [`HnswSearcher::try_search`].
+pub const DEFAULT_EF_SEARCH: usize = 32;
 
 #[allow(non_snake_case)]
 pub struct Hnsw<const D: usize, DS = L2Squared> {
@@ -43,28 +53,85 @@ struct Storage<const D: usize> {
     pub(crate) nodes: Vec<Node>,
 }
 
+/// k-nearest-neighbor search over an index.
+///
+/// Results are `(id, distance)` pairs sorted by ascending distance (ties by id),
+/// at most `min(k, len())` of them.
+///
+/// Query semantics shared by every method:
+/// - `ef_search` must be at least 1, otherwise [`HnswError::InvalidParameter`].
+///   The effective search width is `max(ef_search, k)`; values larger than the
+///   index are allowed and simply visit more of it.
+/// - The query must pass the metric's [`Distance::validate`].
+/// - `k == 0` and an empty index return an empty result.
+///
+/// The `try_*` methods return these errors; the other methods panic with the
+/// error message instead.
 pub trait HnswSearcher<const D: usize> {
     fn search_context(&self) -> SearchContext {
         SearchContext::reusable(self.len())
     }
 
+    fn try_search_with_context(
+        &self,
+        q: &[f32; D],
+        k: usize,
+        ef_search: usize,
+        ctx: &mut SearchContext,
+    ) -> Result<Vec<(usize, f32)>, HnswError>;
+
+    fn try_search_with_ef(
+        &self,
+        q: &[f32; D],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<Vec<(usize, f32)>, HnswError> {
+        check_ef_search(ef_search)?;
+        let mut ctx = SearchContext::one_off(ef_search.min(self.len()).max(1));
+        self.try_search_with_context(q, k, ef_search, &mut ctx)
+    }
+
+    fn try_search(&self, q: &[f32; D], k: usize) -> Result<Vec<(usize, f32)>, HnswError> {
+        self.try_search_with_ef(q, k, DEFAULT_EF_SEARCH)
+    }
+
+    /// Like [`HnswSearcher::try_search_with_ef`] for a runtime-sized query;
+    /// returns [`HnswError::DimensionMismatch`] if `q.len() != D`.
+    fn try_search_slice(
+        &self,
+        q: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<Vec<(usize, f32)>, HnswError> {
+        self.try_search_with_ef(as_array(q)?, k, ef_search)
+    }
+
+    /// # Panics
+    /// When [`HnswSearcher::try_search`] would return an error.
     fn search(&self, q: &[f32; D], k: usize) -> Vec<(usize, f32)> {
-        self.search_with_ef(q, k, 32)
+        self.try_search(q, k)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
+    /// # Panics
+    /// When [`HnswSearcher::try_search_with_ef`] would return an error.
     fn search_with_ef(&self, q: &[f32; D], k: usize, ef_search: usize) -> Vec<(usize, f32)> {
-        assert!(ef_search > 0, "ef_search must be > 0");
-        let mut ctx = SearchContext::one_off(ef_search);
-        self.search_with_context(q, k, ef_search, &mut ctx)
+        self.try_search_with_ef(q, k, ef_search)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
+    /// # Panics
+    /// When [`HnswSearcher::try_search_with_context`] would return an error.
     fn search_with_context(
         &self,
         q: &[f32; D],
         k: usize,
         ef_search: usize,
         ctx: &mut SearchContext,
-    ) -> Vec<(usize, f32)>;
+    ) -> Vec<(usize, f32)> {
+        self.try_search_with_context(q, k, ef_search, ctx)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
 
     fn memory_usage_bytes(&self) -> usize;
 
@@ -80,12 +147,48 @@ impl<const D: usize, DS> Hnsw<D, DS>
 where
     DS: Distance<D>,
 {
+    /// Creates an empty index whose layer assignment is driven by `seed`.
+    ///
+    /// - `M`: links per node on layers above 0, `2..=MAX_CONNECTIONS`
+    /// - `M0`: links per node on layer 0, `1..=MAX_CONNECTIONS`
+    /// - `ef_construction`: candidate list size while inserting, `1..=MAX_EF_CONSTRUCTION`
+    ///
+    /// Sequential insertion into a seeded index is deterministic: the same seed,
+    /// parameters and insertion order produce the same graph.
+    #[allow(non_snake_case)]
+    pub fn try_new_seeded(
+        M: usize,
+        M0: usize,
+        ef_construction: usize,
+        seed: u64,
+        dist: DS,
+    ) -> Result<Self, HnswError> {
+        check_graph_params(M, M0, ef_construction)?;
+        Ok(Self::new_unchecked(M, M0, ef_construction, seed, dist))
+    }
+
+    /// [`Hnsw::try_new_seeded`] with a random seed.
+    #[allow(non_snake_case)]
+    pub fn try_new(
+        M: usize,
+        M0: usize,
+        ef_construction: usize,
+        dist: DS,
+    ) -> Result<Self, HnswError> {
+        let seed = rand::rng().next_u64();
+        Self::try_new_seeded(M, M0, ef_construction, seed, dist)
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_new_seeded`] would return an error.
     #[allow(non_snake_case)]
     pub fn new_seeded(M: usize, M0: usize, ef_construction: usize, seed: u64, dist: DS) -> Self {
-        assert!(M > 1, "M must be > 1");
-        assert!(M0 > 0, "M0 must be > 0");
-        assert!(ef_construction > 0, "ef_construction must be > 0");
+        Self::try_new_seeded(M, M0, ef_construction, seed, dist)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
 
+    #[allow(non_snake_case)]
+    fn new_unchecked(M: usize, M0: usize, ef_construction: usize, seed: u64, dist: DS) -> Self {
         let ml = 1.0 / (M as f64).ln();
         Self {
             M,
@@ -104,11 +207,60 @@ where
         }
     }
 
+    /// # Panics
+    /// When [`Hnsw::try_new`] would return an error.
     #[allow(non_snake_case)]
     pub fn new(M: usize, M0: usize, ef_construction: usize, dist: DS) -> Self {
-        let seed = rand::rng().next_u64();
-        Self::new_seeded(M, M0, ef_construction, seed, dist)
+        Self::try_new(M, M0, ef_construction, dist).unwrap_or_else(|error| panic!("{error}"))
     }
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn check_graph_params(
+    M: usize,
+    M0: usize,
+    ef_construction: usize,
+) -> Result<(), HnswError> {
+    if !(2..=MAX_CONNECTIONS).contains(&M) {
+        return Err(HnswError::InvalidParameter {
+            name: "M",
+            value: M,
+            requirement: "between 2 and 4096",
+        });
+    }
+    if !(1..=MAX_CONNECTIONS).contains(&M0) {
+        return Err(HnswError::InvalidParameter {
+            name: "M0",
+            value: M0,
+            requirement: "between 1 and 4096",
+        });
+    }
+    if !(1..=MAX_EF_CONSTRUCTION).contains(&ef_construction) {
+        return Err(HnswError::InvalidParameter {
+            name: "ef_construction",
+            value: ef_construction,
+            requirement: "between 1 and 65536",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn check_ef_search(ef_search: usize) -> Result<(), HnswError> {
+    if ef_search == 0 {
+        return Err(HnswError::InvalidParameter {
+            name: "ef_search",
+            value: ef_search,
+            requirement: "at least 1",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn as_array<const D: usize>(v: &[f32]) -> Result<&[f32; D], HnswError> {
+    v.try_into().map_err(|_| HnswError::DimensionMismatch {
+        expected: D,
+        found: v.len(),
+    })
 }
 
 // INSERT
@@ -120,20 +272,73 @@ where
         InsertContext::reusable(self.len(), self.ef_construction, self.M0)
     }
 
-    pub fn insert(&self, vec: [f32; D]) -> usize {
+    /// Inserts `vec` and returns its id (its insertion position).
+    ///
+    /// Errors: the vector fails [`Distance::validate`], or the metric returns a
+    /// non-finite distance while the new node's neighbors are searched. On error
+    /// the index is unchanged.
+    pub fn try_insert(&self, vec: [f32; D]) -> Result<usize, HnswError> {
         let mut ctx = InsertContext::one_off(self.ef_construction, self.M0);
-        self.insert_with_context(vec, &mut ctx)
+        self.try_insert_with_context(vec, &mut ctx)
     }
 
+    /// Like [`Hnsw::try_insert`] for a runtime-sized vector; returns
+    /// [`HnswError::DimensionMismatch`] if `vec.len() != D`.
+    pub fn try_insert_slice(&self, vec: &[f32]) -> Result<usize, HnswError> {
+        self.try_insert(*as_array(vec)?)
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_insert`] would return an error.
+    pub fn insert(&self, vec: [f32; D]) -> usize {
+        self.try_insert(vec)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Builds an empty index from `vecs` using up to `threads` worker threads
+    /// (`None`: available parallelism).
+    ///
+    /// All vectors are validated before anything is inserted, so on error the
+    /// index is unchanged. An empty `vecs` is a no-op. Ids are the positions in
+    /// `vecs`. The graph depends on thread scheduling and is not reproducible
+    /// even with a seed; use sequential insertion for a deterministic graph.
+    pub fn try_build_parallel(
+        &mut self,
+        vecs: &[[f32; D]],
+        threads: Option<NonZeroUsize>,
+    ) -> Result<(), HnswError> {
+        let len = self.len();
+        if len != 0 {
+            return Err(HnswError::IndexNotEmpty { len });
+        }
+        self.validate_batch(vecs)?;
+        if vecs.is_empty() {
+            return Ok(());
+        }
+        self.build_parallel_validated(vecs, threads);
+        Ok(())
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_build_parallel`] would return an error.
     pub fn build_parallel(&mut self, vecs: &[[f32; D]], threads: Option<NonZeroUsize>) {
-        assert!(
-            self.is_empty(),
-            "parallel construction is only supported on an empty graph"
-        );
-        assert!(
-            !vecs.is_empty(),
-            "parallel construction requires at least one vector"
-        );
+        self.try_build_parallel(vecs, threads)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn validate_batch(&self, vecs: &[[f32; D]]) -> Result<(), HnswError> {
+        for (index, vec) in vecs.iter().enumerate() {
+            self.dist
+                .validate(vec)
+                .map_err(|error| HnswError::InvalidBatchVector {
+                    index,
+                    error: Box::new(error),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn build_parallel_validated(&mut self, vecs: &[[f32; D]], threads: Option<NonZeroUsize>) {
         let mut nodes = self.preallocate_nodes(vecs);
         // entry is already inserted
         {
@@ -166,13 +371,39 @@ where
         });
     }
 
+    /// Inserts `vecs` concurrently into a possibly non-empty index and returns
+    /// the id assigned to each input, in input order.
+    ///
+    /// All vectors are validated first, so on error nothing is inserted. An
+    /// empty `vecs` returns an empty vector. Which id each vector receives, and
+    /// the resulting graph, depend on thread scheduling.
+    pub fn try_extend_parallel(
+        &self,
+        vecs: &[[f32; D]],
+        threads: Option<NonZeroUsize>,
+    ) -> Result<Vec<usize>, HnswError> {
+        self.validate_batch(vecs)?;
+        if vecs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self.extend_parallel_validated(vecs, threads))
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_extend_parallel`] would return an error.
     pub fn extend_parallel(&self, vecs: &[[f32; D]], threads: Option<NonZeroUsize>) -> Vec<usize> {
-        assert!(
-            !vecs.is_empty(),
-            "parallel extension requires at least one vector"
-        );
+        self.try_extend_parallel(vecs, threads)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn extend_parallel_validated(
+        &self,
+        vecs: &[[f32; D]],
+        threads: Option<NonZeroUsize>,
+    ) -> Vec<usize> {
         let mut internal_id = vec![0; vecs.len()];
-        internal_id[0] = self.insert(vecs[0]);
+        let mut first_ctx = InsertContext::one_off(self.ef_construction, self.M0);
+        internal_id[0] = self.insert_validated(vecs[0], &mut first_ctx, false);
         if vecs.len() == 1 {
             return internal_id;
         }
@@ -188,8 +419,7 @@ where
                 s.spawn(move || {
                     let mut thread_ctx = self.insert_context();
                     for (vec, out_id) in chunk.iter().zip(interal_ids) {
-                        let id = self.insert_with_context(*vec, &mut thread_ctx);
-                        *out_id = id;
+                        *out_id = self.insert_validated(*vec, &mut thread_ctx, false);
                     }
                 });
             }
@@ -198,15 +428,50 @@ where
         internal_id
     }
 
+    /// [`Hnsw::try_insert`] reusing the scratch buffers in `ctx`.
+    pub fn try_insert_with_context(
+        &self,
+        vec: [f32; D],
+        ctx: &mut InsertContext,
+    ) -> Result<usize, HnswError> {
+        self.dist.validate(&vec)?;
+        self.try_insert_validated(vec, ctx, true)
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_insert_with_context`] would return an error.
     pub fn insert_with_context(&self, vec: [f32; D], ctx: &mut InsertContext) -> usize {
+        self.try_insert_with_context(vec, ctx)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Inserts a vector that already passed `validate`. With `strict == false`
+    /// non-finite distances are treated as `+inf` and insertion cannot fail.
+    fn insert_validated(&self, vec: [f32; D], ctx: &mut InsertContext, strict: bool) -> usize {
+        self.try_insert_validated(vec, ctx, strict)
+            .expect("non-strict insertion is infallible")
+    }
+
+    fn try_insert_validated(
+        &self,
+        vec: [f32; D],
+        ctx: &mut InsertContext,
+        strict: bool,
+    ) -> Result<usize, HnswError> {
         let _guard = self.update_lock.read().unwrap();
         let (node, max_lyr) = self.new_node();
 
+        ctx.search_ctx.non_finite_distance = None;
         self.prepare_node(vec, &node, max_lyr, ctx);
+        if let Some(distance) = ctx.search_ctx.non_finite_distance.take()
+            && strict
+        {
+            return Err(HnswError::NonFiniteDistance { distance });
+        }
         let idx = self.commit(vec, node);
         self.publish(idx, max_lyr, &mut ctx.select_ctx);
 
-        idx
+        Ok(idx)
     }
 
     fn insert_preallocated(&self, idx: usize, max_lyr: usize, ctx: &mut InsertContext) -> usize {
@@ -382,8 +647,7 @@ where
 }
 
 fn parallel_thread_count(requested: Option<NonZeroUsize>) -> usize {
-    let available =
-        std::thread::available_parallelism().expect("unable to get number available of threads");
+    let available = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
     requested
         .map_or(available, |requested| requested.min(available))
         .get()
@@ -403,10 +667,9 @@ where
         ef: usize,
         ctx: &'a mut SearchContext,
     ) -> &'a [Link] {
-        assert!(ef > 0, "ef must be > 0");
-        assert!(lyr <= self.entry.read().unwrap().1, "layer not initialized",);
-        assert!(ep < storage.data.len(), "entry point out of bounds",);
-        assert!(
+        debug_assert!(ef > 0, "ef must be > 0");
+        debug_assert!(ep < storage.data.len(), "entry point out of bounds");
+        debug_assert!(
             lyr < storage.nodes[ep].layers.len(),
             "entry point does not exist in this layer"
         );
@@ -416,10 +679,11 @@ where
         visited.reset();
         let frontier = &mut ctx.frontier;
         let best = &mut ctx.best;
+        let non_finite = &mut ctx.non_finite_distance;
 
         let ep_link = Link {
             node_index: ep,
-            distance: self.distance(q, &storage.data[ep]),
+            distance: self.checked_distance(q, &storage.data[ep], non_finite),
         };
         frontier.push(Reverse(ep_link));
         best.push(ep_link);
@@ -439,7 +703,7 @@ where
                     continue;
                 }
                 visited.mark_visited(neigh.node_index);
-                let dist = self.distance(q, &storage.data[neigh.node_index]);
+                let dist = self.checked_distance(q, &storage.data[neigh.node_index], non_finite);
                 if best.len() == ef && best.peek().is_some_and(|furthest| furthest.distance > dist)
                 {
                     best.pop();
@@ -462,36 +726,41 @@ impl<const D: usize, DS> HnswSearcher<D> for Hnsw<D, DS>
 where
     DS: Distance<D>,
 {
-    fn search_with_context(
+    fn try_search_with_context(
         &self,
         q: &[f32; D],
         k: usize,
         ef_search: usize,
         ctx: &mut SearchContext,
-    ) -> Vec<(usize, f32)> {
-        assert!(ef_search > 0, "ef_search must be > 0");
-        if self.is_empty() {
-            return Vec::new();
+    ) -> Result<Vec<(usize, f32)>, HnswError> {
+        check_ef_search(ef_search)?;
+        self.dist.validate(q)?;
+        if k == 0 {
+            return Ok(Vec::new());
         }
 
         let storage = self.storage.read().unwrap();
+        if storage.data.is_empty() {
+            return Ok(Vec::new());
+        }
+        ctx.non_finite_distance = None;
         let (mut ep, max_layer) = *self.entry.read().unwrap();
         for lyr in (1..=max_layer).rev() {
-            ep = self
-                .search_layer_with_context(&storage, q, ep, lyr, 1, ctx)
-                .first()
-                .unwrap_or_else(|| {
-                    panic!("ERROR: search_layer@{lyr} returned an empty array (search)")
-                })
-                .node_index;
+            // a layer search always returns at least its entry point
+            ep = self.search_layer_with_context(&storage, q, ep, lyr, 1, ctx)[0].node_index;
         }
 
-        let results = self.search_layer_with_context(&storage, q, ep, 0, ef_search.max(k), ctx);
         // take k best from final layer search
-        results[..k.min(results.len())]
+        let results: Vec<(usize, f32)> = self
+            .search_layer_with_context(&storage, q, ep, 0, ef_search.max(k), ctx)
             .iter()
+            .take(k)
             .map(|l| (l.node_index, l.distance))
-            .collect()
+            .collect();
+        if let Some(distance) = ctx.non_finite_distance {
+            return Err(HnswError::NonFiniteDistance { distance });
+        }
+        Ok(results)
     }
 
     fn memory_usage_bytes(&self) -> usize {
@@ -526,7 +795,6 @@ where
         keep_pruned: bool,
         ctx: &mut SelectContext,
     ) -> Vec<Link> {
-        assert!(lyr <= self.entry.read().unwrap().1, "layer not initialized",);
         ctx.clear();
         let visited = &mut ctx.visited;
         visited.reset();
@@ -617,7 +885,6 @@ where
         lyr: usize,
         ctx: &mut SelectContext,
     ) {
-        assert!(lyr <= self.entry.read().unwrap().1, "layer not initialized",);
         assert!(at < storage.data.len(), "backlink base index out of bounds",);
         assert!(
             link.node_index < storage.data.len(),
@@ -659,12 +926,28 @@ where
         if lyr == 0 { self.M0 } else { self.M }
     }
 
+    /// Metric distance with non-finite results mapped to `+inf`, keeping the
+    /// graph ordering total when a custom metric breaks its contract.
     #[inline(always)]
     fn distance(&self, a: &[f32; D], b: &[f32; D]) -> f32 {
         let distance = self.dist.distance(a, b);
-        debug_assert!(distance.is_finite(), "distance must be finite");
-        debug_assert!(distance >= 0.0, "distance must be non-negative");
-        distance
+        if distance.is_finite() {
+            distance
+        } else {
+            f32::INFINITY
+        }
+    }
+
+    /// Like [`Self::distance`], but also records the first non-finite result.
+    #[inline(always)]
+    fn checked_distance(&self, a: &[f32; D], b: &[f32; D], seen: &mut Option<f32>) -> f32 {
+        let distance = self.dist.distance(a, b);
+        if distance.is_finite() {
+            distance
+        } else {
+            seen.get_or_insert(distance);
+            f32::INFINITY
+        }
     }
 
     #[inline(always)]
