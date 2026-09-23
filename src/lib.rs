@@ -46,6 +46,11 @@ use std::{
     },
 };
 
+/// Compiles and runs the README examples as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod context;
 mod disk;
 mod dist;
