@@ -37,10 +37,13 @@ use crate::{
 };
 use std::{
     cmp::Reverse,
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     mem::size_of,
     num::NonZeroUsize,
-    sync::{Mutex, RwLock},
+    sync::{
+        Mutex, RwLock,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 mod context;
@@ -67,7 +70,12 @@ pub const DEFAULT_EF_SEARCH: usize = 32;
 /// An HNSW index over `[f32; D]` vectors with distance metric `DS`.
 ///
 /// # Ids
-/// Each inserted vector gets the next insertion position as its id (`0, 1, ...`).
+/// An index is *positional* or *explicit*, fixed by its first insert (see
+/// [`IdMode`]). Positional inserts (`insert`, `build_parallel`, ...) get the next
+/// insertion position as id. Explicit inserts (`insert_with_id`, ...) use the
+/// caller's `usize` id, which must be unique: a repeated id is rejected with
+/// [`HnswError::DuplicateId`], also when two threads race on it. Ids are saved
+/// with the index. There is no delete, update or upsert.
 ///
 /// # Concurrency
 /// Searches and inserts may run concurrently through `&Hnsw`. Once an insert call
@@ -98,6 +106,32 @@ pub struct Hnsw<const D: usize, DS = L2Squared> {
     seed: u64,
     rng: Mutex<StdRng>,
     dist: DS,
+    /// `IdMode as u8`, or `IdMode::UNSET` until the first insert.
+    id_mode: AtomicU8,
+    /// Explicit ids that are stored or reserved by an in-flight insert.
+    taken_ids: Mutex<HashSet<usize>>,
+}
+
+/// How an index assigns ids, fixed by its first insert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IdMode {
+    /// Ids are insertion positions `0, 1, 2, ...` (`insert`, `build_parallel`, ...).
+    Positional = 1,
+    /// Ids are supplied by the caller (`insert_with_id`, ...).
+    Explicit = 2,
+}
+
+impl IdMode {
+    pub(crate) const UNSET: u8 = 0;
+
+    pub(crate) fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Positional),
+            2 => Some(Self::Explicit),
+            _ => None,
+        }
+    }
 }
 
 /// Exact duplicates of a graph node are stored as *members* of that node's group:
@@ -111,6 +145,8 @@ struct Storage<const D: usize> {
     pub(crate) data: Vec<[f32; D]>,
     pub(crate) nodes: Vec<Node>,
     pub(crate) dup_next: Vec<usize>,
+    /// Id reported for each stored vector.
+    pub(crate) ids: Vec<usize>,
 }
 
 /// `dup_next` value for the end of a duplicate list.
@@ -273,11 +309,14 @@ where
                 data: Vec::new(),
                 nodes: Vec::new(),
                 dup_next: Vec::new(),
+                ids: Vec::new(),
             }),
             ml,
             seed,
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             dist,
+            id_mode: AtomicU8::new(IdMode::UNSET),
+            taken_ids: Mutex::new(HashSet::new()),
         }
     }
 
@@ -333,14 +372,19 @@ pub(crate) fn check_ef_search(ef_search: usize) -> Result<(), HnswError> {
 /// The `k` best of a final layer search as `(id, distance)`, ordered by distance
 /// and then ascending id. Each graph node is expanded into its duplicate group
 /// (at most `k` entries per group, all at the node's distance).
-pub(crate) fn top_k(candidates: &[Link], k: usize, dup_next: &[usize]) -> Vec<(usize, f32)> {
+pub(crate) fn top_k(
+    candidates: &[Link],
+    k: usize,
+    dup_next: &[usize],
+    ids: &[usize],
+) -> Vec<(usize, f32)> {
     let mut hits: Vec<(usize, f32)> = Vec::with_capacity(candidates.len());
     for link in candidates {
-        hits.push((link.node_index, link.distance));
+        hits.push((ids[link.node_index], link.distance));
         let mut member = dup_next[link.node_index];
         let mut taken = 1;
         while member != NO_DUP && taken < k {
-            hits.push((member, link.distance));
+            hits.push((ids[member], link.distance));
             member = dup_next[member];
             taken += 1;
         }
@@ -386,11 +430,13 @@ where
         InsertContext::reusable(self.len(), self.ef_construction, self.M0)
     }
 
-    /// Inserts `vec` and returns its id (its insertion position).
+    /// Inserts `vec` into a positional index and returns its id (its insertion
+    /// position).
     ///
-    /// Errors: the vector fails [`Distance::validate`], or the metric returns a
-    /// non-finite distance while the new node's neighbors are searched. On error
-    /// the index is unchanged.
+    /// Errors: the vector fails [`Distance::validate`], the metric returns a
+    /// non-finite distance while the new node's neighbors are searched, or the
+    /// index uses explicit ids ([`HnswError::IdModeMismatch`]). On error the index
+    /// is unchanged.
     pub fn try_insert(&self, vec: [f32; D]) -> Result<usize, HnswError> {
         let mut ctx = InsertContext::one_off(self.ef_construction, self.M0);
         self.try_insert_with_context(vec, &mut ctx)
@@ -409,27 +455,93 @@ where
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    /// Builds an empty index from `vecs` using up to `threads` worker threads
-    /// (`None`: available parallelism).
+    /// [`Hnsw::try_insert`] reusing the scratch buffers in `ctx`.
+    pub fn try_insert_with_context(
+        &self,
+        vec: [f32; D],
+        ctx: &mut InsertContext,
+    ) -> Result<usize, HnswError> {
+        self.dist.validate(&vec)?;
+        self.claim_id_mode(IdMode::Positional)?;
+        self.try_insert_validated(vec, None, ctx, true)
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_insert_with_context`] would return an error.
+    pub fn insert_with_context(&self, vec: [f32; D], ctx: &mut InsertContext) -> usize {
+        self.try_insert_with_context(vec, ctx)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Inserts `vec` under the caller-supplied `id`; searches report `id` for it.
+    ///
+    /// The first insert decides whether an index uses explicit ids; mixing with
+    /// the positional methods returns [`HnswError::IdModeMismatch`]. An id that is
+    /// already present (or reserved by a concurrent insert) returns
+    /// [`HnswError::DuplicateId`]. Ids are never reused or replaced: there is no
+    /// delete or upsert. On error the index is unchanged.
+    pub fn try_insert_with_id(&self, id: usize, vec: [f32; D]) -> Result<(), HnswError> {
+        let mut ctx = InsertContext::one_off(self.ef_construction, self.M0);
+        self.try_insert_with_id_and_context(id, vec, &mut ctx)
+    }
+
+    /// [`Hnsw::try_insert_with_id`] reusing the scratch buffers in `ctx`.
+    pub fn try_insert_with_id_and_context(
+        &self,
+        id: usize,
+        vec: [f32; D],
+        ctx: &mut InsertContext,
+    ) -> Result<(), HnswError> {
+        self.dist.validate(&vec)?;
+        self.claim_id_mode(IdMode::Explicit)?;
+        self.reserve_ids(&[id])?;
+        self.try_insert_validated(vec, Some(id), ctx, true)
+            .map(|_| ())
+            .inspect_err(|_| {
+                self.taken_ids.lock().unwrap().remove(&id);
+            })
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_insert_with_id`] would return an error.
+    pub fn insert_with_id(&self, id: usize, vec: [f32; D]) {
+        self.try_insert_with_id(id, vec)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Whether `id` is stored in (or currently being inserted into) the index.
+    pub fn contains_id(&self, id: usize) -> bool {
+        match self.id_mode() {
+            None => false,
+            Some(IdMode::Positional) => id < self.len(),
+            Some(IdMode::Explicit) => self.taken_ids.lock().unwrap().contains(&id),
+        }
+    }
+
+    /// The id mode fixed by the first insert, or `None` for a fresh index.
+    pub fn id_mode(&self) -> Option<IdMode> {
+        IdMode::from_u8(self.id_mode.load(Ordering::Acquire))
+    }
+
+    /// Builds an empty positional index from `vecs` using up to `threads` worker
+    /// threads (`None`: available parallelism). Ids are the positions in `vecs`.
     ///
     /// All vectors are validated before anything is inserted, so on error the
-    /// index is unchanged. An empty `vecs` is a no-op. Ids are the positions in
-    /// `vecs`. The graph depends on thread scheduling and is not reproducible
-    /// even with a seed; use sequential insertion for a deterministic graph.
+    /// index is unchanged. An empty `vecs` is a no-op. The graph depends on thread
+    /// scheduling and is not reproducible even with a seed; use sequential
+    /// insertion for a deterministic graph.
     pub fn try_build_parallel(
         &mut self,
         vecs: &[[f32; D]],
         threads: Option<NonZeroUsize>,
     ) -> Result<(), HnswError> {
-        let len = self.len();
-        if len != 0 {
-            return Err(HnswError::IndexNotEmpty { len });
-        }
-        self.validate_batch(vecs)?;
+        self.check_empty()?;
+        self.validate_batch(vecs.iter())?;
         if vecs.is_empty() {
             return Ok(());
         }
-        self.build_parallel_validated(vecs, threads);
+        self.claim_id_mode(IdMode::Positional)?;
+        self.build_parallel_validated(vecs, None, threads);
         Ok(())
     }
 
@@ -440,8 +552,48 @@ where
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn validate_batch(&self, vecs: &[[f32; D]]) -> Result<(), HnswError> {
-        for (index, vec) in vecs.iter().enumerate() {
+    /// [`Hnsw::try_build_parallel`] with caller-supplied ids. Duplicate ids within
+    /// `items` return [`HnswError::DuplicateId`] before anything is inserted.
+    pub fn try_build_parallel_with_ids(
+        &mut self,
+        items: &[(usize, [f32; D])],
+        threads: Option<NonZeroUsize>,
+    ) -> Result<(), HnswError> {
+        self.check_empty()?;
+        self.validate_batch(items.iter().map(|(_, vec)| vec))?;
+        if items.is_empty() {
+            return Ok(());
+        }
+        let (ids, vecs): (Vec<usize>, Vec<[f32; D]>) = items.iter().copied().unzip();
+        self.claim_id_mode(IdMode::Explicit)?;
+        self.reserve_ids(&ids)?;
+        self.build_parallel_validated(&vecs, Some(&ids), threads);
+        Ok(())
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_build_parallel_with_ids`] would return an error.
+    pub fn build_parallel_with_ids(
+        &mut self,
+        items: &[(usize, [f32; D])],
+        threads: Option<NonZeroUsize>,
+    ) {
+        self.try_build_parallel_with_ids(items, threads)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn check_empty(&self) -> Result<(), HnswError> {
+        match self.len() {
+            0 => Ok(()),
+            len => Err(HnswError::IndexNotEmpty { len }),
+        }
+    }
+
+    fn validate_batch<'a>(
+        &self,
+        vecs: impl Iterator<Item = &'a [f32; D]>,
+    ) -> Result<(), HnswError> {
+        for (index, vec) in vecs.enumerate() {
             self.dist
                 .validate(vec)
                 .map_err(|error| HnswError::InvalidBatchVector {
@@ -452,8 +604,42 @@ where
         Ok(())
     }
 
-    fn build_parallel_validated(&mut self, vecs: &[[f32; D]], threads: Option<NonZeroUsize>) {
-        let mut nodes = self.preallocate_nodes(vecs);
+    /// Fixes the id mode on first use; errors if the index uses the other one.
+    fn claim_id_mode(&self, mode: IdMode) -> Result<(), HnswError> {
+        match self.id_mode.compare_exchange(
+            IdMode::UNSET,
+            mode as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(current) if current == mode as u8 => Ok(()),
+            Err(current) => Err(HnswError::IdModeMismatch {
+                index_mode: IdMode::from_u8(current).expect("id mode is set"),
+            }),
+        }
+    }
+
+    /// Atomically reserves every id in `ids`, or none of them.
+    fn reserve_ids(&self, ids: &[usize]) -> Result<(), HnswError> {
+        let mut taken = self.taken_ids.lock().unwrap();
+        let mut batch = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if taken.contains(&id) || !batch.insert(id) {
+                return Err(HnswError::DuplicateId { id });
+            }
+        }
+        taken.extend(batch);
+        Ok(())
+    }
+
+    fn build_parallel_validated(
+        &mut self,
+        vecs: &[[f32; D]],
+        ids: Option<&[usize]>,
+        threads: Option<NonZeroUsize>,
+    ) {
+        let mut nodes = self.preallocate_nodes(vecs, ids);
         // entry is already inserted
         {
             let entry = self.entry.read().unwrap();
@@ -479,8 +665,8 @@ where
         });
     }
 
-    /// Inserts `vecs` concurrently into a possibly non-empty index and returns
-    /// the id assigned to each input, in input order.
+    /// Inserts `vecs` concurrently into a possibly non-empty positional index and
+    /// returns the id assigned to each input, in input order.
     ///
     /// All vectors are validated first, so on error nothing is inserted. An
     /// empty `vecs` returns an empty vector. Which id each vector receives, and
@@ -490,11 +676,12 @@ where
         vecs: &[[f32; D]],
         threads: Option<NonZeroUsize>,
     ) -> Result<Vec<usize>, HnswError> {
-        self.validate_batch(vecs)?;
+        self.validate_batch(vecs.iter())?;
         if vecs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self.extend_parallel_validated(vecs, threads))
+        self.claim_id_mode(IdMode::Positional)?;
+        Ok(self.extend_parallel_validated(vecs, None, threads))
     }
 
     /// # Panics
@@ -504,65 +691,85 @@ where
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
+    /// Inserts `items` concurrently under their caller-supplied ids.
+    ///
+    /// All vectors are validated and all ids reserved before anything is
+    /// inserted: an id that repeats within `items`, or is already present or being
+    /// inserted concurrently, returns [`HnswError::DuplicateId`] and nothing is
+    /// inserted. The graph depends on thread scheduling; the id of every vector
+    /// does not.
+    pub fn try_extend_parallel_with_ids(
+        &self,
+        items: &[(usize, [f32; D])],
+        threads: Option<NonZeroUsize>,
+    ) -> Result<(), HnswError> {
+        self.validate_batch(items.iter().map(|(_, vec)| vec))?;
+        if items.is_empty() {
+            return Ok(());
+        }
+        let (ids, vecs): (Vec<usize>, Vec<[f32; D]>) = items.iter().copied().unzip();
+        self.claim_id_mode(IdMode::Explicit)?;
+        self.reserve_ids(&ids)?;
+        self.extend_parallel_validated(&vecs, Some(&ids), threads);
+        Ok(())
+    }
+
+    /// # Panics
+    /// When [`Hnsw::try_extend_parallel_with_ids`] would return an error.
+    pub fn extend_parallel_with_ids(
+        &self,
+        items: &[(usize, [f32; D])],
+        threads: Option<NonZeroUsize>,
+    ) {
+        self.try_extend_parallel_with_ids(items, threads)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Returns the positional ids assigned (`ids[i]` when `ids` is given).
     fn extend_parallel_validated(
         &self,
         vecs: &[[f32; D]],
+        ids: Option<&[usize]>,
         threads: Option<NonZeroUsize>,
     ) -> Vec<usize> {
-        let mut internal_id = vec![0; vecs.len()];
+        let id_of = |i: usize| ids.map(|ids| ids[i]);
+        let mut assigned = vec![0; vecs.len()];
         let mut first_ctx = InsertContext::one_off(self.ef_construction, self.M0);
-        internal_id[0] = self.insert_validated(vecs[0], &mut first_ctx, false);
+        assigned[0] = self.insert_validated(vecs[0], id_of(0), &mut first_ctx);
         if vecs.len() == 1 {
-            return internal_id;
+            return assigned;
         }
-        let vecs = &vecs[1..];
 
         let nthreads = parallel_thread_count(threads);
-        let chunk_sz = vecs.len().div_ceil(nthreads);
+        let chunk_sz = (vecs.len() - 1).div_ceil(nthreads);
         std::thread::scope(|s| {
-            for (chunk, interal_ids) in vecs
-                .chunks(chunk_sz)
-                .zip(internal_id[1..].chunks_mut(chunk_sz))
-            {
+            for (chunk_index, out) in assigned[1..].chunks_mut(chunk_sz).enumerate() {
+                let start = 1 + chunk_index * chunk_sz;
                 s.spawn(move || {
                     let mut thread_ctx = self.insert_context();
-                    for (vec, out_id) in chunk.iter().zip(interal_ids) {
-                        *out_id = self.insert_validated(*vec, &mut thread_ctx, false);
+                    for (offset, out_id) in out.iter_mut().enumerate() {
+                        let i = start + offset;
+                        *out_id = self.insert_validated(vecs[i], id_of(i), &mut thread_ctx);
                     }
                 });
             }
         });
 
-        internal_id
+        assigned
     }
 
-    /// [`Hnsw::try_insert`] reusing the scratch buffers in `ctx`.
-    pub fn try_insert_with_context(
-        &self,
-        vec: [f32; D],
-        ctx: &mut InsertContext,
-    ) -> Result<usize, HnswError> {
-        self.dist.validate(&vec)?;
-        self.try_insert_validated(vec, ctx, true)
-    }
-
-    /// # Panics
-    /// When [`Hnsw::try_insert_with_context`] would return an error.
-    pub fn insert_with_context(&self, vec: [f32; D], ctx: &mut InsertContext) -> usize {
-        self.try_insert_with_context(vec, ctx)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    /// Inserts a vector that already passed `validate`. With `strict == false`
-    /// non-finite distances are treated as `+inf` and insertion cannot fail.
-    fn insert_validated(&self, vec: [f32; D], ctx: &mut InsertContext, strict: bool) -> usize {
-        self.try_insert_validated(vec, ctx, strict)
+    /// Inserts a vector that already passed `validate` and whose id (if any) is
+    /// reserved; non-finite distances are treated as `+inf`, so it cannot fail.
+    fn insert_validated(&self, vec: [f32; D], id: Option<usize>, ctx: &mut InsertContext) -> usize {
+        self.try_insert_validated(vec, id, ctx, false)
             .expect("non-strict insertion is infallible")
     }
 
+    /// Returns the storage position of the inserted vector.
     fn try_insert_validated(
         &self,
         vec: [f32; D],
+        id: Option<usize>,
         ctx: &mut InsertContext,
         strict: bool,
     ) -> Result<usize, HnswError> {
@@ -581,7 +788,7 @@ where
             // committed as the very first node; if another insert won that race,
             // search for neighbors again.
             let is_member = matches!(placement, Placement::DuplicateOf(_));
-            match self.commit(vec, node, placement) {
+            match self.commit(vec, id, node, placement) {
                 Ok(idx) => break (idx, is_member),
                 Err(unlinked) => node = unlinked,
             }
@@ -696,7 +903,13 @@ where
 
     /// Appends the vector. A [`Placement::First`] node is given back unless storage
     /// is still empty; a duplicate is stored as a layerless member of its group.
-    fn commit(&self, vec: [f32; D], node: Node, placement: Placement) -> Result<usize, Node> {
+    fn commit(
+        &self,
+        vec: [f32; D],
+        id: Option<usize>,
+        node: Node,
+        placement: Placement,
+    ) -> Result<usize, Node> {
         debug_assert!(
             !node.layers.is_empty(),
             "cannot commit a node with no layers"
@@ -716,6 +929,7 @@ where
             }
         }
         storage.data.push(vec);
+        storage.ids.push(id.unwrap_or(insert_idx));
         Ok(insert_idx)
     }
 
@@ -765,7 +979,7 @@ where
         (node, max_lyr)
     }
 
-    fn preallocate_nodes(&self, vecs: &[[f32; D]]) -> Vec<(usize, usize)> {
+    fn preallocate_nodes(&self, vecs: &[[f32; D]], ids: Option<&[usize]>) -> Vec<(usize, usize)> {
         let mut storage = self.storage.write().unwrap();
         assert!(
             storage.data.is_empty() && storage.nodes.is_empty(),
@@ -778,6 +992,7 @@ where
             let (node, max_lyr) = self.new_node();
             let idx = storage.data.len();
             storage.data.push(*vec);
+            storage.ids.push(ids.map_or(idx, |ids| ids[idx]));
             match first_copy.entry(exact_key(vec)) {
                 Entry::Occupied(rep) => {
                     let rep = *rep.get();
@@ -915,6 +1130,7 @@ where
             self.search_layer_with_context(&storage, q, ep, 0, ef_search.max(k), ctx),
             k,
             &storage.dup_next,
+            &storage.ids,
         );
         if let Some(distance) = ctx.non_finite_distance {
             return Err(HnswError::NonFiniteDistance { distance });
@@ -927,6 +1143,7 @@ where
         size_of::<Self>()
             + storage.data.capacity() * size_of::<[f32; D]>()
             + storage.dup_next.capacity() * size_of::<usize>()
+            + storage.ids.capacity() * size_of::<usize>()
             + nodes_heap_usage_bytes(&storage.nodes)
     }
 

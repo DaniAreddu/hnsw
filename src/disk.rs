@@ -1,9 +1,13 @@
 use std::{
+    collections::HashSet,
     error::Error,
     fs::File,
     io::BufWriter,
     path::Path,
-    sync::{Mutex, RwLock},
+    sync::{
+        Mutex, RwLock,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 use rand::{
@@ -16,7 +20,7 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
 };
 
-use crate::{Hnsw, Storage, dist::Distance, node::Node};
+use crate::{Hnsw, IdMode, Storage, dist::Distance, node::Node};
 
 struct FlatF32<'a, const D: usize>(&'a [[f32; D]]);
 impl<'a, const D: usize> From<&'a [[f32; D]]> for FlatF32<'a, D> {
@@ -35,6 +39,8 @@ struct SerializedHnsw<DS> {
     data: Vec<Vec<f32>>,
     nodes: Vec<Node>,
     dup_next: Vec<u64>,
+    ids: Vec<u64>,
+    id_mode: u8,
     max_layer: usize,
     ml: f64,
     seed: u64,
@@ -86,7 +92,7 @@ where
     {
         let _guard = self.update_lock.write().unwrap();
         let storage = self.storage.read().unwrap();
-        let mut state = serializer.serialize_struct("Hnsw", 11)?;
+        let mut state = serializer.serialize_struct("Hnsw", 13)?;
         let (ep, max_layer) = *self.entry.read().unwrap();
         state.serialize_field("M", &(self.M as u64))?;
         state.serialize_field("M0", &(self.M0 as u64))?;
@@ -96,6 +102,9 @@ where
         state.serialize_field("nodes", &storage.nodes)?;
         let dup_next: Vec<u64> = storage.dup_next.iter().map(|&next| next as u64).collect();
         state.serialize_field("dup_next", &dup_next)?;
+        let ids: Vec<u64> = storage.ids.iter().map(|&id| id as u64).collect();
+        state.serialize_field("ids", &ids)?;
+        state.serialize_field("id_mode", &self.id_mode.load(Ordering::Acquire))?;
         state.serialize_field("max_layer", &(max_layer as u64))?;
         state.serialize_field("ml", &self.ml)?;
         state.serialize_field("seed", &self.seed)?;
@@ -139,6 +148,28 @@ where
             }
         }
 
+        let id_mode = IdMode::from_u8(disk.id_mode);
+        if disk.ids.len() != data.len() || (id_mode.is_none() && !data.is_empty()) {
+            return Err(serde::de::Error::custom("invalid id table"));
+        }
+        let mut ids = Vec::with_capacity(disk.ids.len());
+        let mut taken_ids = HashSet::new();
+        for (position, id) in disk.ids.into_iter().enumerate() {
+            let id = usize::try_from(id)
+                .map_err(|_| serde::de::Error::custom("id does not fit in usize"))?;
+            let valid = match id_mode {
+                Some(IdMode::Positional) => id == position,
+                Some(IdMode::Explicit) => taken_ids.insert(id),
+                None => false,
+            };
+            if !valid {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid or duplicate id {id} at position {position}"
+                )));
+            }
+            ids.push(id);
+        }
+
         // advance rng
         let mut rng = StdRng::seed_from_u64(disk.seed);
         for _ in 0..data.len() {
@@ -155,11 +186,14 @@ where
                 data,
                 nodes: disk.nodes,
                 dup_next,
+                ids,
             }),
             ml: disk.ml,
             seed: disk.seed,
             rng: Mutex::new(rng),
             dist: disk.dist,
+            id_mode: AtomicU8::new(disk.id_mode),
+            taken_ids: Mutex::new(taken_ids),
         })
     }
 }

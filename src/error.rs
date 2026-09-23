@@ -28,6 +28,11 @@ pub enum HnswError {
     NonFiniteDistance { distance: f32 },
     /// The operation requires an empty index.
     IndexNotEmpty { len: usize },
+    /// The id is already stored, reserved by a concurrent insert, or repeated
+    /// within one batch.
+    DuplicateId { id: usize },
+    /// Positional and explicit-id inserts cannot be mixed in one index.
+    IdModeMismatch { index_mode: crate::IdMode },
     /// The vector at `index` of a batch was rejected; nothing was inserted.
     InvalidBatchVector { index: usize, error: Box<HnswError> },
 }
@@ -63,6 +68,19 @@ impl fmt::Display for HnswError {
             Self::IndexNotEmpty { len } => write!(
                 f,
                 "the index already holds {len} vectors; this operation needs an empty index"
+            ),
+            Self::DuplicateId { id } => write!(
+                f,
+                "id {id} is already present or being inserted; ids must be unique"
+            ),
+            Self::IdModeMismatch { index_mode } => write!(
+                f,
+                "this index uses {} ids; use the matching insert methods",
+                match index_mode {
+                    crate::IdMode::Positional => "positional (insert, extend_parallel, ...)",
+                    crate::IdMode::Explicit =>
+                        "explicit (insert_with_id, extend_parallel_with_ids, ...)",
+                }
             ),
             Self::InvalidBatchVector { index, error } => {
                 write!(
