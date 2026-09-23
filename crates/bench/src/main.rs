@@ -404,4 +404,45 @@ ef_construction = 128
         config.configs[0].build_threads = NonZeroUsize::new(2);
         assert!(validate_config(&config).is_err());
     }
+
+    fn toml_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable config directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                toml_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "toml") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_checked_in_config_parses_and_validates() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut paths = vec![root.join("bench-config.toml")];
+        toml_files(&root.join("benchmarks/configs"), &mut paths);
+        assert!(paths.len() > 1, "expected checked-in benchmark configs");
+
+        let failures: Vec<String> = paths
+            .iter()
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(path).expect("readable config");
+                let result = toml::from_str::<BenchFile>(&text)
+                    .map_err(|error| error.to_string())
+                    .and_then(|config| validate_config(&config).map_err(str::to_owned));
+                result
+                    .err()
+                    .map(|error| format!("{}: {error}", path.display()))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "invalid configs:
+{}",
+            failures.join(
+                "
+"
+            )
+        );
+    }
 }
