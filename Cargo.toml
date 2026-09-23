@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
+description = "HNSW approximate nearest-neighbor index over fixed-size f32 vectors, with validated inputs, stable ids and crash-safe versioned snapshots"
+repository = "https://github.com/DaniAreddu/hnsw"
+readme = "README.md"
+keywords = ["hnsw", "ann", "nearest-neighbor", "vector-search", "similarity"]
+categories = ["algorithms", "data-structures"]
+include = ["/src/**/*.rs", "/README.md", "/LICENSE", "/CHANGELOG.md", "/docs/SNAPSHOT_FORMAT.md"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 crc32fast = "1.5.0"
