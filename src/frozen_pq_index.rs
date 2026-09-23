@@ -3,7 +3,7 @@ use rayon::prelude::*;
 
 use crate::{
     Distance, Hnsw, HnswError, HnswSearcher, L2Squared, check_ef_search, context::SearchContext,
-    link::Link, node::Node, nodes_heap_usage_bytes,
+    link::Link, node::Node, nodes_heap_usage_bytes, top_k,
 };
 use std::{cmp::Reverse, mem::size_of};
 
@@ -12,6 +12,7 @@ pub struct FrozenPQHnsw<const D: usize, const Q: usize> {
     entry_point: usize,
     data: Vec<[u8; Q]>,
     nodes: Vec<Node>,
+    dup_next: Vec<usize>,
     max_layer: usize,
     pq: ProductQuantizer<Q, D>,
 }
@@ -27,11 +28,14 @@ impl<const D: usize, const Q: usize> FrozenPQHnsw<D, Q> {
             hnsw.storage.read().unwrap().nodes.len(),
             "quantized data length must match HNSW index length"
         );
+        let storage = hnsw.storage.into_inner().unwrap();
+        let (entry_point, max_layer) = hnsw.entry.into_inner().unwrap();
         Self {
-            entry_point: hnsw.entry.read().unwrap().0,
+            entry_point,
             data: quantized_data,
-            nodes: std::mem::take(&mut hnsw.storage.write().unwrap().nodes),
-            max_layer: hnsw.entry.read().unwrap().1,
+            nodes: storage.nodes,
+            dup_next: storage.dup_next,
+            max_layer,
             pq,
         }
     }
@@ -154,17 +158,14 @@ impl<const D: usize, const Q: usize> HnswSearcher<D> for FrozenPQHnsw<D, Q> {
         }
 
         let results = self.search_layer_with_context(&adc, ep, 0, ef_search.max(k), ctx);
-        // take k best from final layer search
-        Ok(results[..k.min(results.len())]
-            .iter()
-            .map(|l| (l.node_index, l.distance))
-            .collect())
+        Ok(top_k(results, k, &self.dup_next))
     }
 
     fn memory_usage_bytes(&self) -> usize {
         size_of::<Self>()
             + self.data.capacity() * size_of::<[u8; Q]>()
             + nodes_heap_usage_bytes(&self.nodes)
+            + self.dup_next.capacity() * size_of::<usize>()
             + self.pq.heap_usage_bytes()
     }
 
