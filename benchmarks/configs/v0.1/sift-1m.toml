@@ -1,0 +1,23 @@
+# v0.1 release benchmark, meaningful dataset: SIFT-128 1M with its ground truth.
+# The batched build is also saved and reloaded through the v1 snapshot format.
+dataset_path = "data/sift-128-euclidean.hdf5"
+dimension = 128
+top_k = 10
+query_limit = 1000
+warmup_queries = 100
+query_cycles = 3
+seed = 42
+ef_searches = [16, 32, 64, 128, 256]
+output_json = "benchmarks/results/v0.1/sift-1m.json"
+
+[[configs]]
+m = 16
+m0 = 32
+ef_construction = 128
+
+[[configs]]
+m = 16
+m0 = 32
+ef_construction = 128
+build_mode = "batched"
+build_threads = 8

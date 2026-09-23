@@ -31,7 +31,11 @@ The runner sets `RUSTFLAGS="-C target-cpu=native"` unless `RUSTFLAGS` is already
 
 ## Benchmark setup
 
-These results were measured on an Apple M3 Pro:
+The results in `results/build`, `results/measure` and `plots/` are **historical**: they were measured by the original author with the pre-v0.1 code on an Apple M3 Pro and were not re-run for v0.1. The v0.1 release measurements (this repository's current code, different hardware) are in [`RESULTS-v0.1.md`](RESULTS-v0.1.md) and `results/v0.1/`.
+
+Indexes saved by the pre-v0.1 code use an unversioned format that v0.1 rejects, so run the `build` stage again before `measure`.
+
+The historical results were measured on an Apple M3 Pro:
 
 - CPU: Apple M3 Pro
 - Memory: 18 GB
@@ -82,8 +86,10 @@ The benchmark is configured through a TOML file such as `bench-config.toml`.
 
 The fields describe the dataset and how the benchmark should run:
 
-- `dataset_path`: HDF5 file to read
-- `dimension`: vector dimension, currently matched in `src/bin/bench.rs`
+- `dataset_path`: HDF5 file to read (needs the `hdf5` feature), or instead
+- `[synthetic]`: a table (`base`, `queries`, `seed`) for seeded uniform vectors with brute-force ground truth
+- `dimension`: vector dimension, matched in `crates/bench/src/main.rs` (16, 128, 784)
+- `min_recall`: optional; the run fails if any measured recall is below it
 - `top_k`: number of expected neighbors
 - `warmup_queries`: queries excluded from timing
 - `query_limit`: number of queries

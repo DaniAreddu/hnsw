@@ -46,6 +46,11 @@ use std::{
     },
 };
 
+/// Compiles and runs the README examples as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod context;
 mod disk;
 mod dist;
@@ -1158,6 +1163,8 @@ where
             + storage.dup_next.capacity() * size_of::<usize>()
             + storage.ids.capacity() * size_of::<usize>()
             + nodes_heap_usage_bytes(&storage.nodes)
+            // hashbrown: one control byte per bucket
+            + self.taken_ids.lock().unwrap().capacity() * (size_of::<usize>() + 1)
     }
 
     fn len(&self) -> usize {
