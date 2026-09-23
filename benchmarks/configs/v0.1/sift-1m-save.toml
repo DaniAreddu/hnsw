@@ -1,0 +1,18 @@
+# v0.1: batched SIFT1M build saved through the v1 snapshot format (save time).
+dataset_path = "data/sift-128-euclidean.hdf5"
+dimension = 128
+top_k = 10
+query_limit = 1000
+warmup_queries = 100
+query_cycles = 1
+seed = 42
+ef_searches = [64]
+save_index_prefix = "data/index/v0.1/sift-1m"
+output_json = "benchmarks/results/v0.1/sift-1m-save.json"
+
+[[configs]]
+m = 16
+m0 = 32
+ef_construction = 128
+build_mode = "batched"
+build_threads = 8

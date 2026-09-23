@@ -1,0 +1,43 @@
+{
+  "schema_version": 3,
+  "dataset_path": "data/sift-128-euclidean.hdf5",
+  "dimension": 128,
+  "base_count": 1000000,
+  "query_count": 1000,
+  "query_limit": 1000,
+  "base_limit": null,
+  "top_k": 10,
+  "effective_k": 10,
+  "quantization_setting": null,
+  "pq": null,
+  "runs": [
+    {
+      "m": 16,
+      "m0": 32,
+      "ef_construction": 128,
+      "ef_search": 64,
+      "measured_query_count": 900,
+      "memory_bytes": 938258856,
+      "memory_mib": 894.7933731079102,
+      "recall": 0.9574444444444422,
+      "qps": 1636.851715784343,
+      "avg_latency_ms": 0.6109289999999999,
+      "p50_ms": 0.615,
+      "p90_ms": 0.7672,
+      "p99_ms": 0.9531999999999999,
+      "max_ms": 1.1577,
+      "build_time_s": null,
+      "insert_qps": null,
+      "load_time_s": 5.4041984,
+      "load_path": "data/index/v0.1/sift-1m-dim128-m16-m032-efc128.bin",
+      "save_time_s": null,
+      "save_path": null,
+      "build_mode": null,
+      "build_repetition": null,
+      "build_threads": null,
+      "effective_build_threads": null,
+      "pq_oracle_recall": null,
+      "pq_encode_time_s": null
+    }
+  ]
+}
