@@ -748,7 +748,7 @@ where
         writer: W,
         hooks: &SaveHooks<'_>,
     ) -> Result<(), SnapshotError> {
-        let metric_id = self.dist.metric_id();
+        let metric_id = <DS as Distance<D>>::metric_id();
         if metric_id.len() > MAX_METRIC_ID_LEN {
             return Err(SnapshotError::Unsupported(
                 "metric id longer than 256 bytes",
@@ -890,16 +890,17 @@ where
                 found: header.dimension as u64,
             });
         }
+        let expected_metric = <DS as Distance<D>>::metric_id();
+        if expected_metric != header.metric_id {
+            return Err(SnapshotError::MetricMismatch {
+                expected: expected_metric.to_owned(),
+                found: header.metric_id,
+            });
+        }
         let dist = DS::deserialize(&mut serde_json::Deserializer::from_slice(
             &header.metric_params,
         ))
         .map_err(|error| SnapshotError::Metric(error.to_string()))?;
-        if dist.metric_id() != header.metric_id {
-            return Err(SnapshotError::MetricMismatch {
-                expected: dist.metric_id().to_owned(),
-                found: header.metric_id,
-            });
-        }
         check_graph_params(
             header.m as usize,
             header.m0 as usize,
